@@ -1,0 +1,31 @@
+{
+  "functions": {
+    "source": "functions",
+    "predeploy": [
+      "npm --prefix \"$RESOURCE_DIR\" run build"
+    ]
+  },
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "bhmh-fd67c",
+          "appId": "1:740232636681:android:a34877a971ed4034550bd8",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "bhmh-fd67c",
+          "configurations": {
+            "android": "1:740232636681:android:a34877a971ed4034550bd8",
+            "ios": "1:740232636681:ios:065ffbcb0f32ac50550bd8",
+            "macos": "1:740232636681:ios:065ffbcb0f32ac50550bd8",
+            "web": "1:740232636681:web:a142c972f6804b07550bd8",
+            "windows": "1:740232636681:web:121a88ed48a3eee3550bd8"
+          }
+        }
+      }
+    }
+  }
+}

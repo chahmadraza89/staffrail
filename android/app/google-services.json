@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "740232636681",
+    "project_id": "bhmh-fd67c",
+    "storage_bucket": "bhmh-fd67c.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:740232636681:android:a34877a971ed4034550bd8",
+        "android_client_info": {
+          "package_name": "com.app.bhmh"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBCnUPTMkfTbMUaelVYxQkDk5A6sL6eHO4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

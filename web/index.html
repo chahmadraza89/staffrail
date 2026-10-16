@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <!--
+    If you are serving your web app in a path other than the root, change the
+    href value below to reflect the base path you are serving from.
+
+    The path provided below has to start and end with a slash "/" in order for
+    it to work correctly.
+
+    For more details:
+    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
+
+    This is a placeholder for base href that will be replaced by the value of
+    the `--base-href` argument provided to `flutter build`.
+  -->
+  <base href="$FLUTTER_BASE_HREF">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="description" content="BHMH Staff Management - Empowering Care Together">
+
+  <!-- iOS meta tags & icons -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="BHMH">
+  <link rel="apple-touch-icon" href="icons/app_logo.png">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="favicon.png"/>
+
+  <title>BHMH</title>
+  <link rel="manifest" href="manifest.json">
+
+  <style>
+    /* ── Web Loading Splash Screen ── */
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: #ffffff;
+    }
+
+    #loading {
+      position: fixed;
+      inset: 0;
+      z-index: 9999;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background-color: #ffffff;
+      transition: opacity 0.5s ease-out;
+    }
+
+    #loading.fade-out {
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    #loading img {
+      width: 120px;
+      height: 120px;
+      object-fit: contain;
+      animation: pulse 1.8s ease-in-out infinite;
+    }
+
+    #loading .spinner {
+      margin-top: 32px;
+      width: 36px;
+      height: 36px;
+      border: 3px solid rgba(0, 150, 136, 0.15);
+      border-top-color: #009688;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    #loading .app-name {
+      margin-top: 16px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 14px;
+      font-weight: 500;
+      color: rgba(0, 0, 0, 0.45);
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+    }
+
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.06); }
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+  <!-- Loading Splash — visible while Flutter initializes -->
+  <div id="loading">
+    <img src="icons/app_logo.png" alt="BHMH Logo" />
+    <div class="spinner"></div>
+    <p class="app-name">Staff Management</p>
+  </div>
+  
+  <!-- Firebase JS SDKs (Required for reliable FCM on Web) -->
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-messaging-compat.js"></script>
+
+  <script src="flutter_bootstrap.js" async></script>
+
+  <script>
+    // Remove loading splash once Flutter renders its first frame
+    window.addEventListener('flutter-first-frame', function () {
+      const loader = document.getElementById('loading');
+      if (loader) {
+        loader.classList.add('fade-out');
+        loader.addEventListener('transitionend', function () {
+          loader.remove();
+        });
+      }
+    });
+  </script>
+</body>
+</html>

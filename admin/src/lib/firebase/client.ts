@@ -1,6 +1,7 @@
 import { getApp, getApps, initializeApp, type FirebaseApp, type FirebaseOptions } from "firebase/app"
 import { getAuth, type Auth } from "firebase/auth"
 import { getFirestore, type Firestore } from "firebase/firestore"
+import { getFunctions, type Functions } from "firebase/functions"
 import { getStorage, type FirebaseStorage } from "firebase/storage"
 
 /**
@@ -85,6 +86,15 @@ export function getFirebaseFirestore(): Firestore {
 
 export function getFirebaseStorage(): FirebaseStorage {
   return getStorage(getFirebaseApp())
+}
+
+/**
+ * Cloud Functions client — default region (us-central1), same as the
+ * Flutter app (`FirebaseFunctions.instance`, no region override) and the
+ * deployed `registerStaff` callable in functions/src/index.ts.
+ */
+export function getFirebaseFunctions(): Functions {
+  return getFunctions(getFirebaseApp())
 }
 
 /**

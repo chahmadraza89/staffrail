@@ -479,7 +479,7 @@ function EmployeeProgressTable({ query }: { query: LiveQueryResult<AdminEmployee
             />
             {employees.length > 0 ? (
               <>
-                <EmployeeRows employees={employees} />
+                <EmployeeTable employees={employees} />
                 <StaleNote what="This table" />
               </>
             ) : null}
@@ -489,24 +489,30 @@ function EmployeeProgressTable({ query }: { query: LiveQueryResult<AdminEmployee
             No active employees yet — add them from the Directory.
           </p>
         ) : (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Employee</TableHead>
-                <TableHead>Overall</TableHead>
-                <TableHead>Onboarding</TableHead>
-                <TableHead>Training</TableHead>
-                <TableHead>Clearance</TableHead>
-                <TableHead>Last login</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              <EmployeeRows employees={employees} />
-            </TableBody>
-          </Table>
+          <EmployeeTable employees={employees} />
         )}
       </CardContent>
     </Card>
+  )
+}
+
+function EmployeeTable({ employees }: { employees: AdminEmployeeProgress[] }) {
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>Employee</TableHead>
+          <TableHead>Overall</TableHead>
+          <TableHead>Onboarding</TableHead>
+          <TableHead>Training</TableHead>
+          <TableHead>Clearance</TableHead>
+          <TableHead>Last login</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        <EmployeeRows employees={employees} />
+      </TableBody>
+    </Table>
   )
 }
 

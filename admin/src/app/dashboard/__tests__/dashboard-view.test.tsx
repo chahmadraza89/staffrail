@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react"
 
 import * as streams from "@/lib/admin/dashboard-streams"
 import { DEFAULT_ACTION_TASK_PAGE_SIZE } from "@/lib/admin/dashboard-streams"
@@ -169,6 +169,37 @@ describe("DashboardView — failure surfaces", () => {
     expect(screen.getAllByText(/Missing Firestore composite index/)).toHaveLength(2)
     expect(screen.getAllByRole("button", { name: /retry/i }).length).toBeGreaterThanOrEqual(2)
     expect(screen.queryByText(/All caught up/i)).not.toBeInTheDocument()
+  })
+
+  it("keeps retained employee rows inside a complete table when progress fails", () => {
+    render(<DashboardView adminUid="adm-1" adminEmail="admin@staffrail.dev" />)
+
+    const employee: AdminEmployeeProgress = {
+      uid: "emp-1",
+      name: "Ahmad",
+      email: "ahmad@example.com",
+      overallProgress: 0.5,
+      onboardingProgress: 0.5,
+      trainingProgress: 0.5,
+      clearanceProgress: 0.5,
+      lastLogin: new Date("2026-10-17T12:00:00Z"),
+      isActive: true,
+    }
+
+    fire(() => employeesCtrl.emit("users", [employee]))
+    expect(within(screen.getByRole("table")).getByRole("link", { name: "Ahmad" }))
+      .toBeInTheDocument()
+
+    fire(() => employeesCtrl.fail("users", new Error("permission-denied")))
+
+    expect(screen.getByText(/Employee progress could not be streamed/)).toBeInTheDocument()
+    expect(screen.getByText(/stale — retained from the last successful update/)).toBeInTheDocument()
+
+    const table = screen.getByRole("table")
+    expect(within(table).getByRole("columnheader", { name: "Employee" })).toBeInTheDocument()
+    const row = within(table).getByRole("link", { name: "Ahmad" }).closest("tr")
+    expect(row?.parentElement?.tagName).toBe("TBODY")
+    expect(row?.parentElement?.parentElement).toBe(table)
   })
 
   it("retained alerts are labeled stale when the task stream fails", () => {

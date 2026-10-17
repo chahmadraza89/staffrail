@@ -17,6 +17,9 @@ export default defineConfig({
   },
   test: {
     environment: "node",
-    include: ["src/**/*.test.ts"],
+    // Component/hook tests opt into jsdom per-file via
+    // `// @vitest-environment jsdom`.
+    include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
+    setupFiles: ["src/test-shims/vitest.setup.ts"],
   },
 })

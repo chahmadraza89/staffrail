@@ -138,6 +138,54 @@ fails with `permission-denied`, the correct fix is to allow the *admin
 role* in the existing rules (pattern used by the Flutter app), not to open
 the collection.
 
+## Firestore composite indexes
+
+The dashboard's "Action Required" query filters the `onboarding_tasks`
+collection **group** server-side (equality on `adminId`, `status in`
+actionable statuses, `updatedAt desc`) and therefore requires one composite
+index. The definition ships with the repository so every environment
+creates it identically — see `firestore.indexes.json` (project root, wired
+into `firebase.json`) :
+
+```
+collectionGroup: onboarding_tasks     (queryScope: COLLECTION_GROUP)
+fields: adminId ASC, status ASC, updatedAt DESC
+```
+
+### Creating the index
+
+Pick one:
+
+- **Firebase CLI** (uses the committed definition, applies to ALL listed
+  indexes): `firebase deploy --only firestore:indexes --project bhmh-fd67c`
+  (index creation changes no documents and no rules — only query planning).
+- **Console**: open a dashboard panel while the index is missing; the
+  actionable error banner mentions "Missing Firestore composite index." and
+  Firestore's error carries a one-click **create index** link you can paste
+  into the browser.
+
+Index creation takes a few minutes; it does not touch production records.
+
+### After the index is ready
+
+**Important:** a live Firestore subscription that already failed (missing
+index) does **NOT** recover by itself once the index finishes building.
+The affected panel shows an actionable error instead of a fake healthy
+state — press its **Retry** button (or reload the page) to start a fresh
+subscription. Never restart the browser to "fix" it silently.
+
+### Partial counts / pagination semantics
+
+The dashboard shows the **newest** actionable tasks, one page of
+`DEFAULT_ACTION_TASK_PAGE_SIZE` (25). Actionable-status filtering happens
+server-side, so a page can never silently drop an older approval in favor
+of newer non-actionable tasks; but if the page is full the count is shown
+as `N+` and labelled *partial*, and a **Load older approvals** button
+re-subscribes with the next page size (older approvals become reachable;
+a full page of real approvals always offers this). Compliance alerts are
+derived from the current page: while the page is partial the alerts panel
+explicitly says it is **not** a complete compliance assessment.
+
 ## Deploy
 
 `next build` is Vercel-ready. Set the production env vars from

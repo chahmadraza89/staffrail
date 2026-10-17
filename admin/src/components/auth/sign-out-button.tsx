@@ -12,7 +12,13 @@ import { Button } from "@/components/ui/button"
  * Logout: clears the server session cookie, signs out the Firebase browser
  * instance, and clears any cached per-account client state (queries).
  */
-export function SignOutButton() {
+export function SignOutButton({
+  className,
+  variant = "outline",
+}: {
+  className?: string
+  variant?: "outline" | "ghost" | "default"
+} = {}) {
   const router = useRouter()
   const queryClient = useQueryClient()
   const [busy, setBusy] = useState(false)
@@ -29,7 +35,7 @@ export function SignOutButton() {
   }
 
   return (
-    <Button variant="outline" onClick={handleSignOut} disabled={busy}>
+    <Button variant={variant} onClick={handleSignOut} disabled={busy} className={className}>
       {busy ? "Signing out…" : "Sign out"}
     </Button>
   )

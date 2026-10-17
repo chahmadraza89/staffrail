@@ -2,10 +2,16 @@
 
 import { useCallback, useEffect, useState } from "react"
 
-import type { Unsubscribe } from "@/lib/admin/dashboard-streams"
+import {
+  LiveStreamEngine,
+  emptyEngineState,
+  type EngineState,
+  type StreamBuilder,
+  type LiveStatus,
+} from "@/lib/admin/stream-protocol"
 
 /**
- * Real-time subscription hook with an explicit lifecycle.
+ * Real-time multi-listener subscription hook with an explicit lifecycle.
  *
  * NOTE: This intentionally does NOT use TanStack Query's queryFn for
  * subscriptions: with `initialData` + `staleTime: Infinity` TanStack treats
@@ -14,30 +20,45 @@ import type { Unsubscribe } from "@/lib/admin/dashboard-streams"
  * itself (subscribe on mount → unsubscribe on unmount) and tracks
  * connecting/ready/error/retry separately from "genuinely empty" results.
  *
+ * Every underlying Firestore listener is tracked individually by
+ * `LiveStreamEngine` (see stream-protocol.ts): statistics only claim
+ * readiness after BOTH of its listeners delivered initial snapshots, one
+ * listener's failure stays failed even while another continues, and empty
+ * results are distinguishable from "not loaded" and "failed".
+ *
  * TanStack Query remains the provider for non-live (one-shot / action)
  * queries on protected screens.
  */
 
-export type LiveStatus = "connecting" | "ready" | "error"
-
-export type SubscribeFn<TData> = (
-  onData: (data: TData) => void,
-  onError: (error: Error) => void,
-) => Unsubscribe
+export type { LiveStatus, StreamBuilder }
 
 export interface LiveQueryResult<TData> {
   /** Latest snapshot (initialData until the first event arrives). */
   data: TData
   /** connecting → ready; error keeps last-known data for display + retry. */
   status: LiveStatus
+  /** FIRST unresolved listener error, if any (data stays available). */
   error: Error | null
-  /** Retry restarts the subscription from scratch. */
+  /** Announced listeners that never delivered anything yet. */
+  pending: ReadonlySet<string>
+  /** All unresolved per-listener errors, for diagnostics. */
+  errors: ReadonlyMap<string, Error>
+  /** Retry disposes the current subscription set and starts a fresh one. */
   retry: () => void
 }
 
 export interface LiveQueryOptions<TData> {
-  /** Subscription factory. MUST be referentially stable (useCallback). */
-  subscribe: SubscribeFn<TData>
+  /**
+   * Identity of the data source (usually the admin uid). Changing it tears
+   * down the current subscriptions and resets state — a different account
+   * must never inherit the previous account's data or listener state.
+   */
+  key: string
+  /**
+   * Subscription builder. MUST be referentially stable (useCallback) and
+   * announce every listener via `ctrl.listen(id)` synchronously at start.
+   */
+  subscribe: StreamBuilder<TData>
   /** Shown before the first snapshot. */
   initialData: TData
   /** Do not subscribe until arguments resolve (e.g. uid present). */
@@ -45,48 +66,69 @@ export interface LiveQueryOptions<TData> {
 }
 
 export function useLiveQuery<TData>({
+  key,
   subscribe,
   initialData,
   enabled = true,
 }: LiveQueryOptions<TData>): LiveQueryResult<TData> {
-  const [data, setData] = useState<TData>(initialData)
-  // "connecting" until the first snapshot/error of the current attempt.
-  const [status, setStatus] = useState<LiveStatus>("connecting")
-  const [error, setError] = useState<Error | null>(null)
   const [attempt, setAttempt] = useState(0)
+  const [data, setData] = useState<TData>(initialData)
+  const [state, setState] = useState<EngineState<TData>>(() => emptyEngineState(initialData))
+  const [trackedKey, setTrackedKey] = useState(key)
+
+  // Reset when the data source changes (account switch) — the officially
+  // sanctioned "adjust state on prop change" render pattern; no stale data
+  // from one account may ever be shown for another.
+  if (trackedKey !== key) {
+    setTrackedKey(key)
+    setData(initialData)
+    setState(emptyEngineState(initialData))
+  }
 
   // The effect ONLY synchronizes React with the external system (starting /
-  // stopping the Firestore listener); all state updates happen in its
-  // callbacks, per the Rules of React.
+  // disposing the engine); all state updates happen in engine callbacks,
+  // per the Rules of React.
   useEffect(() => {
     if (!enabled) {
       return
     }
 
-    const unsubscribe = subscribe(
-      (next) => {
-        setData(next)
-        setStatus("ready")
-        setError(null)
-      },
-      (streamError) => {
-        // Keep last-known data so the UI can show it alongside the error
-        // banner + retry instead of silently hiding the failure.
-        setError(streamError)
-        setStatus("error")
-      },
-    )
+    const engine = new LiveStreamEngine<TData>(subscribe, initialData)
+    let current = true
 
-    return unsubscribe
-    // All reactive values used here are listed; `subscribe` must be stable.
-  }, [subscribe, enabled, attempt])
+    const unsubscribeView = engine.subscribeView((next) => {
+      if (!current) {
+        return
+      }
+      setData(next.data)
+      setState(next)
+    })
+    engine.start()
 
-  // Event handler (not an effect): resetting the statuses for the next try.
+    return () => {
+      current = false
+      unsubscribeView()
+      // Cleanup order: stop callbacks first, then the raw listeners —
+      // a disposed subscription can never mutate current state.
+      engine.dispose()
+    }
+    // initialData is a stable constant per panel; engine restarts on
+    // key/subscribe changes or when the user retries.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, subscribe, enabled, attempt])
+
   const retry = useCallback(() => {
-    setStatus("connecting")
-    setError(null)
+    setData(initialData)
+    setState(emptyEngineState(initialData))
     setAttempt((current) => current + 1)
-  }, [])
+  }, [initialData])
 
-  return { data, status, error, retry }
+  return {
+    data,
+    status: state.status,
+    error: state.error,
+    pending: state.pending,
+    errors: state.errors,
+    retry,
+  }
 }

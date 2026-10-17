@@ -25,6 +25,7 @@ import type {
   ActionRequiredTask,
   ComplianceAlert,
 } from "@/lib/admin/dashboard-models"
+import type { LiveStreamController } from "@/lib/admin/stream-protocol"
 
 /**
  * Real-time Firestore subscriptions for the admin dashboard — a faithful
@@ -35,6 +36,12 @@ import type {
  *  - streamAdminActionRequiredTasks  → subscribeAdminActionRequiredTasks
  *  - streamAdminEmployeesProgress    → subscribeAdminEmployeesProgress
  *  - complianceAlertsProvider logic  → deriveComplianceAlerts
+ *
+ * All builders report per-listener readiness/errors through
+ * `LiveStreamController` (stream-protocol.ts) so the UI can distinguish
+ * "not loaded", "loaded but empty", and "failed" for every underlying
+ * listener — and so one listener's failure is never silently hidden by
+ * another listener's success.
  */
 
 export type Unsubscribe = () => void
@@ -74,29 +81,35 @@ function startOfDayMinus(days: number): Date {
 
 /**
  * Streams the (onboarding 30d, completed-today, active-employees) tuple.
- * Two watchers (users where adminId == me, collectionGroup onboarding_tasks
- * where adminId == me) combined latest-wins, exactly like the Flutter
- * switchMap implementation.
+ * TWO underlying listeners (users, collectionGroup onboarding_tasks),
+ * combined latest-wins like the Flutter switchMap implementation.
+ *
+ * Readiness: the engine marks each of the two listeners ready on ITS first
+ * snapshot; the panel only shows "ready" after both delivered. Each
+ * snapshot publishes the fully merged tuple under its own listener id, so
+ * a failure in one listener never clears the other's error and vice versa.
  */
 export function subscribeAdminDashboardStats(
   adminId: string,
-  onData: (stats: AdminDashboardStats) => void,
-  onError: (error: Error) => void,
+  ctrl: LiveStreamController<AdminDashboardStats>,
 ): Unsubscribe {
   const db = getFirebaseFirestore()
 
-  type Partial = { onboarding?: number; active?: number; completedToday?: number }
-  const latest: Partial = {}
+  // Announce both listeners up front: neither panel is "ready" until BOTH
+  // delivered their first snapshot.
+  ctrl.listen("users")
+  ctrl.listen("tasks")
 
-  const emit = () => {
-    onData({
-      onboarding: latest.onboarding ?? 0,
-      active: latest.active ?? 0,
-      completedToday: latest.completedToday ?? 0,
-    })
-  }
+  type PartialStats = { onboarding?: number; active?: number; completedToday?: number }
+  const latest: PartialStats = {}
 
-  const usersStream = onSnapshot(
+  const merged = (): AdminDashboardStats => ({
+    onboarding: latest.onboarding ?? 0,
+    active: latest.active ?? 0,
+    completedToday: latest.completedToday ?? 0,
+  })
+
+  const usersUnsub = onSnapshot(
     query(
       collection(db, FIREBASE_COLLECTIONS.users),
       where("adminId", "==", adminId),
@@ -116,12 +129,12 @@ export function subscribeAdminDashboardStats(
         return created !== null && created.getTime() > cutoff.getTime()
       }).length
 
-      emit()
+      ctrl.emit("users", merged())
     },
-    onError,
+    (error) => ctrl.fail("users", error),
   )
 
-  const tasksStream = onSnapshot(
+  const tasksUnsub = onSnapshot(
     query(
       collectionGroup(db, FIREBASE_COLLECTIONS.onboardingTasks),
       where("adminId", "==", adminId),
@@ -134,28 +147,26 @@ export function subscribeAdminDashboardStats(
         return data.isCompleted === true && completedAt !== null && completedAt.getTime() > today
       }).length
 
-      emit()
+      ctrl.emit("tasks", merged())
     },
-    onError,
+    (error) => ctrl.fail("tasks", error),
   )
 
   return () => {
-    usersStream()
-    tasksStream()
+    usersUnsub()
+    tasksUnsub()
   }
 }
 
 /* ══ 2. Action-required tasks ═══════════════════════════════════════════ */
 
 /**
- * Stream limits for the action-required task query.
- * Primary: pending (isCompleted==false) tasks, server-ordered by recency,
- *   limit 50 — enough headroom that older pending tasks are kept even when
- *   many tasks were completed recently (the correctness fix vs Flutter).
- * Fallback: legacy newest-25 while the composite index is not available.
+ * Default page size for the actionable-task query. Older approvals stay
+ * reachable by growing the page (the view re-subscribes with a larger
+ * limit — see the "Load older approvals" control) rather than by a
+ * newest-N-then-filter trick, which could silently omit approvals.
  */
-export const ACTION_REQUIRED_PRIMARY_LIMIT = 50
-export const ACTION_REQUIRED_FALLBACK_LIMIT = 25
+export const DEFAULT_ACTION_TASK_PAGE_SIZE = 25
 
 /**
  * Parses/sub-categorizes a task document — the subset of
@@ -186,102 +197,60 @@ export function mapActionTask(
 /**
  * Streams onboarding tasks that need admin action.
  *
- * Correctness fix vs the Flutter app: the old query fetched the 25 NEWEST
- * tasks regardless of completion and filtered statuses in memory — so a
- * burst of recently-completed tasks could hide OLDER pending approvals.
- * Now:
+ * Correctness notes (the two earlier iterations got this wrong, copied from
+ * Flutter):
  *
- *  primary  → `adminId == me` + `isCompleted == false`, ordered
- *             `updatedAt desc` (server-side), limit 50.
- *             Requires the composite index:
- *             adminId ASC, isCompleted ASC, updatedAt DESC — add it
- *             once (Firebase console / firebase CLI) for full correctness.
- *  fallback → legacy newest-25 + in-memory status filter, used ONLY when
- *             the composite index is missing (soft-degrade with a warning
- *             so behavior matches the Flutter app until the index exists).
+ *  1. The ACTIONABLE STATUSES are filtered SERVER-SIDE via `in`. The
+ *     earlier design limited 50/25 newest tasks and filtered in memory, so
+ *     a burst of newer non-actionable tasks (`notStarted` etc.) could
+ *     silently hide an older `submitted` approval.
+ *  2. There is intentionally NO `isCompleted` filter: an approval awaiting
+ *     the admin's signature/action IS valid even if isCompleted is true —
+ *     excluding those would hide valid work.
+ *  3. No silent fallback. If the required composite index
+ *     (adminId ASC, status ASC, updatedAt DESC — committed in
+ *     firestore.indexes.json) is missing, the listener FAILS LOUDLY:
+ *     the panel shows an actionable error (deploy the bundled indexes,
+ *     then Retry) instead of a deceptively healthy "all caught up".
+ *     Live subscriptions do not self-upgrade after the index appears —
+ *     an existing failed panel needs Retry (or a page reload).
+ *
+ * Pagination: a single ordered query per page size. Growing the page
+ * re-subscribes (the engine tears down the old subscription set and starts
+ * fresh), which for admin-scale data is cheap and keeps one source of
+ * truth for realtime updates. `results.length === pageSize` signals that
+ * the page may be partial — the UI labels counts as partial and offers
+ * "Load older approvals" instead of showing a complete looking list.
  */
 export function subscribeAdminActionRequiredTasks(
   adminId: string,
-  onData: (tasks: ActionRequiredTask[]) => void,
-  onError: (error: Error) => void,
+  pageSize: number,
+  ctrl: LiveStreamController<ActionRequiredTask[]>,
 ): Unsubscribe {
   const db = getFirebaseFirestore()
-  const group = collectionGroup(db, FIREBASE_COLLECTIONS.onboardingTasks)
 
-  const primaryQuery = query(
-    group,
+  ctrl.listen("tasks")
+
+  const tasksQuery = query(
+    collectionGroup(db, FIREBASE_COLLECTIONS.onboardingTasks),
     where("adminId", "==", adminId),
-    where("isCompleted", "==", false),
+    where("status", "in", ACTION_REQUIRED_STATUSES as readonly string[]),
     orderBy("updatedAt", "desc"),
-    limit(ACTION_REQUIRED_PRIMARY_LIMIT),
-  )
-  const fallbackQuery = query(
-    group,
-    where("adminId", "==", adminId),
-    orderBy("updatedAt", "desc"),
-    limit(ACTION_REQUIRED_FALLBACK_LIMIT),
+    limit(pageSize),
   )
 
-  let stopped = false
-  let fallbackUnsub: Unsubscribe | null = null
-
-  // Status filtering remains in memory both paths (Firestore cannot combine
-  // a status `in` list with `orderBy updatedAt` without a second composite
-  // index — same reason the Flutter app filtered client-side).
-  const actionFilter = (task: ActionRequiredTask) =>
-    ACTION_REQUIRED_STATUSES.includes(task.status)
-
-  const primaryUnsub = onSnapshot(
-    primaryQuery,
+  return onSnapshot(
+    tasksQuery,
     (snapshot) => {
-      emit(
-        snapshot.docs
-          .map((doc) => mapActionTask(doc.id, doc.data()))
-          .filter(actionFilter),
+      // Server already narrowed to actionable statuses; no in-memory
+      // status filter (and therefore no way for newer irrelevant tasks to
+      // crowd older approvals out of a page).
+      ctrl.emit(
+        "tasks",
+        snapshot.docs.map((doc) => mapActionTask(doc.id, doc.data())),
       )
     },
-    (error) => {
-      if (stopped) {
-        return
-      }
-      // Composite index not created yet → soft-degrade to the legacy
-      // behavior instead of failing the whole dashboard.
-      if (isIndexCompatibilityError(error) && !fallbackUnsub) {
-        console.warn(
-          "[dashboard-stream] action-required query needs composite index " +
-            "(adminId ASC, isCompleted ASC, updatedAt DESC). " +
-            "Falling back to newest-25 + in-memory filter until then.",
-        )
-        fallbackUnsub = onSnapshot(
-          fallbackQuery,
-          (snapshot) => emit(snapshot.docs.map((doc) => mapActionTask(doc.id, doc.data())).filter(actionFilter)),
-          onError,
-        )
-        return
-      }
-      onError(error)
-    },
-  )
-
-  // Local pass-through for readability below.
-  function emit(tasks: ActionRequiredTask[]): void {
-    onData(tasks)
-  }
-
-  return () => {
-    stopped = true
-    primaryUnsub()
-    fallbackUnsub?.()
-  }
-}
-
-/** Detects "requires composite index" style Firestore errors. */
-export function isIndexCompatibilityError(error: unknown): boolean {
-  const code = (error as { code?: string })?.code ?? ""
-  const message = String((error as Error)?.message ?? "")
-  return (
-    code === "failed-precondition" ||
-    /requires.*(composite )?index|index.*(not|is not).{0,20}(found|available|created)|failed.?precondition/i.test(message)
+    (error) => ctrl.fail("tasks", error),
   )
 }
 
@@ -289,16 +258,37 @@ export function isIndexCompatibilityError(error: unknown): boolean {
 
 /**
  * Real-time per-employee progress aggregation — port of
- * streamAdminEmployeesProgress: users where adminId+role==employee, each
- * employee gets three sub-collection watchers (onboarding_tasks, trainings,
- * clearance); progress is recalculated whenever any of them change.
+ * streamAdminEmployeesProgress: users where adminId+role==employee, then
+ * three sub-collection watchers per employee (onboarding_tasks, trainings,
+ * clearance); progress recalculated whenever any of them change.
+ *
+ * Listener bookkeeping:
+ *   users          → announced once, ready on the employee-list snapshot.
+ *   emp:{uid}:{module} → three per-employee listeners, announced/recalled
+ *   dynamically as employees appear/disappear from the list.
+ *
+ * Completeness: results are only "ready" once the employee list AND every
+ * currently-attached sub-collection watcher delivered their initial
+ * snapshot — an employee with all-empty sub-collections becomes ready
+ * normally (empty ≠ not-loaded ≠ failed, all distinguishable). When an
+ * employee disappears mid-session their watchers are unsubscribed and
+ * `forget()`-ed; their late callbacks are ignored via the removed flag.
  */
 export function subscribeAdminEmployeesProgress(
   adminId: string,
-  onData: (progress: AdminEmployeeProgress[]) => void,
-  onError: (error: Error) => void,
+  ctrl: LiveStreamController<AdminEmployeeProgress[]>,
 ): Unsubscribe {
   const db = getFirebaseFirestore()
+
+  const MODULES = [
+    FIREBASE_COLLECTIONS.onboardingTasks,
+    FIREBASE_COLLECTIONS.trainings,
+    FIREBASE_COLLECTIONS.clearanceItems,
+  ] as const
+
+  // The employee list listener is the anchor; per-employee watchers are
+  // announced dynamically inside attachEmployeeStreams.
+  ctrl.listen("users")
 
   const usersQuery = query(
     collection(db, FIREBASE_COLLECTIONS.users),
@@ -316,9 +306,10 @@ export function subscribeAdminEmployeesProgress(
   }
 
   interface EmployeeWatchers {
-    unsubTasks?: Unsubscribe
-    unsubTrainings?: Unsubscribe
-    unsubClearance?: Unsubscribe
+    uid: string
+    /** late-callback guard after the employee leaves the list */
+    removed: boolean
+    unsubs: Unsubscribe[]
     taskDocs: QuerySnapshot<DocumentData> | null
     trainingDocs: QuerySnapshot<DocumentData> | null
     clearanceDocs: QuerySnapshot<DocumentData> | null
@@ -326,7 +317,6 @@ export function subscribeAdminEmployeesProgress(
 
   const employeeWatchers = new Map<string, EmployeeWatchers>()
   let employees: EmployeeData[] = []
-  let usersUnsub: Unsubscribe | null = null
 
   const computeProgress = (): AdminEmployeeProgress[] =>
     employees.map((employee) => {
@@ -385,41 +375,54 @@ export function subscribeAdminEmployeesProgress(
       }
     })
 
-  const emit = () => onData(computeProgress())
+  const moduleIds = (uid: string): string[] =>
+    MODULES.map((module) => `emp:${uid}:${module}`)
 
-  const attachEmployeeStreams = (uid: string): EmployeeWatchers => {
+  const attachEmployeeStreams = (uid: string): void => {
+    const ids = moduleIds(uid)
+    // Announce BEFORE the raw listeners can fire their first snapshots.
+    for (const id of ids) {
+      ctrl.listen(id)
+    }
+
     const entry: EmployeeWatchers = {
+      uid,
+      removed: false,
+      unsubs: [],
       taskDocs: null,
       trainingDocs: null,
       clearanceDocs: null,
     }
 
-    entry.unsubTasks = onSnapshot(
-      collection(db, FIREBASE_COLLECTIONS.users, uid, FIREBASE_COLLECTIONS.onboardingTasks),
-      (snapshot) => {
-        entry.taskDocs = snapshot
-        emit()
-      },
-      onError,
-    )
-    entry.unsubTrainings = onSnapshot(
-      collection(db, FIREBASE_COLLECTIONS.users, uid, FIREBASE_COLLECTIONS.trainings),
-      (snapshot) => {
-        entry.trainingDocs = snapshot
-        emit()
-      },
-      onError,
-    )
-    entry.unsubClearance = onSnapshot(
-      collection(db, FIREBASE_COLLECTIONS.users, uid, FIREBASE_COLLECTIONS.clearanceItems),
-      (snapshot) => {
-        entry.clearanceDocs = snapshot
-        emit()
-      },
-      onError,
-    )
+    ids.forEach((id, moduleIndex) => {
+      entry.unsubs.push(
+        onSnapshot(
+          collection(db, FIREBASE_COLLECTIONS.users, uid, MODULES[moduleIndex]),
+          (snapshot) => {
+            // Ignored late callbacks (employee detached the same tick).
+            if (entry.removed) {
+              return
+            }
+            if (moduleIndex === 0) {
+              entry.taskDocs = snapshot
+            } else if (moduleIndex === 1) {
+              entry.trainingDocs = snapshot
+            } else {
+              entry.clearanceDocs = snapshot
+            }
+            ctrl.emit(id, computeProgress())
+          },
+          (error) => {
+            if (entry.removed) {
+              return
+            }
+            ctrl.fail(id, error)
+          },
+        ),
+      )
+    })
 
-    return entry
+    employeeWatchers.set(uid, entry)
   }
 
   const detachEmployeeStreams = (uid: string): void => {
@@ -427,13 +430,19 @@ export function subscribeAdminEmployeesProgress(
     if (!entry) {
       return
     }
-    entry.unsubTasks?.()
-    entry.unsubTrainings?.()
-    entry.unsubClearance?.()
+    entry.removed = true
+    for (const unsub of entry.unsubs) {
+      unsub()
+    }
     employeeWatchers.delete(uid)
+    // Recall the dynamic listeners so stale ids cannot keep the panel in
+    // "connecting" or keep a false error after the employee is gone.
+    for (const id of moduleIds(uid)) {
+      ctrl.forget(id)
+    }
   }
 
-  usersUnsub = onSnapshot(
+  const usersUnsub = onSnapshot(
     usersQuery,
     (snapshot) => {
       const nextEmployees: EmployeeData[] = []
@@ -461,18 +470,18 @@ export function subscribeAdminEmployeesProgress(
       }
       for (const uid of nextEmployees.map((employee) => employee.uid)) {
         if (!employeeWatchers.has(uid)) {
-          employeeWatchers.set(uid, attachEmployeeStreams(uid))
+          attachEmployeeStreams(uid)
         }
       }
 
       employees = nextEmployees
-      emit()
+      ctrl.emit("users", computeProgress())
     },
-    onError,
+    (error) => ctrl.fail("users", error),
   )
 
   return () => {
-    usersUnsub?.()
+    usersUnsub()
     for (const uid of Array.from(employeeWatchers.keys())) {
       detachEmployeeStreams(uid)
     }
@@ -485,6 +494,10 @@ export function subscribeAdminEmployeesProgress(
  * Synthesizes compliance alerts from action-required tasks — port of the
  * Flutter `complianceAlertsProvider`: Overdue (dueDate passed, not
  * completed) or Signature Needed (waitingForApprover), oldest due first.
+ *
+ * NOTE: the input is one PAGE of actionable tasks (orderBy updatedAt desc,
+ * limit pageSize) — when the page is full the alerts are (potentially)
+ * partial too, and the UI must label them as such.
  */
 export function deriveComplianceAlerts(tasks: ActionRequiredTask[], now: Date = new Date()): ComplianceAlert[] {
   const alerts: ComplianceAlert[] = []

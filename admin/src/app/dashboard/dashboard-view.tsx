@@ -2,7 +2,7 @@
 
 import Link from "next/link"
 import { useCallback, useMemo, type ReactNode } from "react"
-import { AlertTriangle, CircleCheck, Clock, PenLine, UsersRound } from "lucide-react"
+import { AlertTriangle, CircleCheck, Clock, PenLine, RefreshCw, UsersRound } from "lucide-react"
 
 import {
   deriveComplianceAlerts,
@@ -17,7 +17,7 @@ import type {
   ComplianceAlert,
 } from "@/lib/admin/dashboard-models"
 import { STATUS_UI } from "@/lib/admin/task-status"
-import { useLiveQuery, type SubscribeFn } from "@/lib/react/use-live-query"
+import { useLiveQuery, type LiveQueryResult } from "@/lib/react/use-live-query"
 
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -31,6 +31,10 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
  *   2. action-required tiles
  *   3. compliance alerts (overdue + signature needed)
  *   4. employee-wise progress table
+ *
+ * Loading, error, and genuinely-empty states are rendered separately — a
+ * Firestore outage or missing index shows an explicit error banner (with a
+ * Retry control), never a fake-looking "all caught up".
  */
 
 interface DashboardViewProps {
@@ -43,33 +47,41 @@ const EMPTY_PROGRESS: AdminEmployeeProgress[] = []
 const EMPTY_STATS: AdminDashboardStats = { onboarding: 0, completedToday: 0, active: 0 }
 
 export function DashboardView({ adminUid, adminEmail }: DashboardViewProps) {
-  const statsSubscribe = useCallback<SubscribeFn<AdminDashboardStats>>(
-    (onData, onError) => subscribeAdminDashboardStats(adminUid, onData, onError),
+  const statsSubscribe = useCallback(
+    (onData: (next: AdminDashboardStats) => void, onError: (error: Error) => void) =>
+      subscribeAdminDashboardStats(adminUid, onData, onError),
     [adminUid],
   )
-  const tasksSubscribe = useCallback<SubscribeFn<ActionRequiredTask[]>>(
-    (onData, onError) => subscribeAdminActionRequiredTasks(adminUid, onData, onError),
+  const tasksSubscribe = useCallback(
+    (onData: (next: ActionRequiredTask[]) => void, onError: (error: Error) => void) =>
+      subscribeAdminActionRequiredTasks(adminUid, onData, onError),
     [adminUid],
   )
-  const progressSubscribe = useCallback<SubscribeFn<AdminEmployeeProgress[]>>(
-    (onData, onError) => subscribeAdminEmployeesProgress(adminUid, onData, onError),
+  const progressSubscribe = useCallback(
+    (onData: (next: AdminEmployeeProgress[]) => void, onError: (error: Error) => void) =>
+      subscribeAdminEmployeesProgress(adminUid, onData, onError),
     [adminUid],
   )
 
-  const stats = useLiveQuery<AdminDashboardStats>(["dashboard/stats", adminUid], {
+  const stats = useLiveQuery<AdminDashboardStats>({
     subscribe: statsSubscribe,
     initialData: EMPTY_STATS,
   })
-  const tasks = useLiveQuery<ActionRequiredTask[]>(["dashboard/action-required", adminUid], {
+  const tasks = useLiveQuery<ActionRequiredTask[]>({
     subscribe: tasksSubscribe,
     initialData: EMPTY_TASKS,
   })
-  const employees = useLiveQuery<AdminEmployeeProgress[]>(["dashboard/employees-progress", adminUid], {
+  const employees = useLiveQuery<AdminEmployeeProgress[]>({
     subscribe: progressSubscribe,
     initialData: EMPTY_PROGRESS,
   })
 
-  const alerts = useMemo<ComplianceAlert[]>(() => deriveComplianceAlerts(tasks), [tasks])
+  const alerts = useMemo<ComplianceAlert[]>(
+    () => deriveComplianceAlerts(tasks.data),
+    [tasks.data],
+  )
+
+  const statsError = stats.status === "error"
 
   return (
     <div className="space-y-6">
@@ -86,58 +98,120 @@ export function DashboardView({ adminUid, adminEmail }: DashboardViewProps) {
         </Button>
       </header>
 
+      {statsError ? (
+        <LiveErrorBanner
+          error={stats.error}
+          retry={stats.retry}
+          message="Live dashboard statistics could not be streamed."
+        />
+      ) : null}
+
       <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <StatCard
-          icon={<UsersRound className="size-4" />}
           label="Active Employees"
-          value={stats.active}
+          value={stats.data.active}
           hint="role = employee, isActive"
+          query={stats}
         />
         <StatCard
-          icon={<Clock className="size-4" />}
           label="Onboarding (30 days)"
-          value={stats.onboarding}
+          value={stats.data.onboarding}
           hint="joined in the last 30 days"
+          query={stats}
         />
         <StatCard
-          icon={<CircleCheck className="size-4" />}
           label="Completed Today"
-          value={stats.completedToday}
+          value={stats.data.completedToday}
           hint="tasks completed since midnight"
+          query={stats}
         />
       </section>
 
       <section className="grid gap-4 lg:grid-cols-2">
-        <ActionRequiredCard tasks={tasks} />
+        <ActionRequiredCard query={tasks} />
         <ComplianceAlertsCard alerts={alerts} />
       </section>
 
-      <EmployeeProgressTable employees={employees} />
+      <EmployeeProgressTable query={employees} />
     </div>
+  )
+}
+
+/* ── shared UI bits ────────────────────────────────────────────────────── */
+
+function LiveErrorBanner({
+  error,
+  retry,
+  message,
+}: {
+  error: Error | null
+  retry: () => void
+  message: string
+}) {
+  const code = (error as { code?: unknown } | null)?.code
+  const details = code ? String(code) : ""
+  return (
+    <div
+      role="alert"
+      className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
+    >
+      <div className="flex items-center gap-2">
+        <AlertTriangle className="size-4 shrink-0" />
+        <span>
+          {message}
+          {details ? ` (${details})` : ""} If the code mentions an index, an
+          administrator must create the missing Firestore composite index.
+        </span>
+      </div>
+      <Button size="sm" variant="outline" onClick={retry} className="shrink-0">
+        <RefreshCw className="mr-1.5 size-3.5" />
+        Retry
+      </Button>
+    </div>
+  )
+}
+
+function ConnectingEmpty({
+  text,
+}: {
+  text: string
+}) {
+  return (
+    <p className="text-muted-foreground animate-pulse py-6 text-center text-sm">{text}</p>
   )
 }
 
 /* ── counters ──────────────────────────────────────────────────────────── */
 
 function StatCard({
-  icon,
   label,
   value,
   hint,
+  query,
 }: {
-  icon: ReactNode
   label: string
   value: number
   hint: string
+  query: LiveQueryResult<AdminDashboardStats>
 }) {
+  const icon = (
+    label === "Active Employees" ? <UsersRound className="size-4" /> :
+    label === "Onboarding (30 days)" ? <Clock className="size-4" /> :
+    <CircleCheck className="size-4" />
+  )
+
   return (
-    <Card>
+    <Card className={query.status === "connecting" ? "opacity-60" : undefined}>
       <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
         <CardTitle className="text-muted-foreground text-sm font-medium">{label}</CardTitle>
         <span className="bg-primary/10 text-primary rounded-lg p-2">{icon}</span>
       </CardHeader>
       <CardContent>
-        <p className="text-3xl font-semibold tabular-nums">{value}</p>
+        {query.status === "connecting" ? (
+          <p className="text-muted-foreground text-3xl font-semibold tabular-nums">—</p>
+        ) : (
+          <p className="text-3xl font-semibold tabular-nums">{value}</p>
+        )}
         <p className="text-muted-foreground mt-1 text-xs">{hint}</p>
       </CardContent>
     </Card>
@@ -146,7 +220,9 @@ function StatCard({
 
 /* ── action required ───────────────────────────────────────────────────── */
 
-function ActionRequiredCard({ tasks }: { tasks: ActionRequiredTask[] }) {
+function ActionRequiredCard({ query }: { query: LiveQueryResult<ActionRequiredTask[]> }) {
+  const tasks = query.data
+
   return (
     <Card>
       <CardHeader className="flex flex-row items-center gap-3 space-y-0">
@@ -155,20 +231,33 @@ function ActionRequiredCard({ tasks }: { tasks: ActionRequiredTask[] }) {
         </span>
         <CardTitle className="text-base">Action Required</CardTitle>
         <Badge variant="secondary" className="ml-auto tabular-nums">
-          {tasks.length}
+          {query.status === "connecting" ? "…" : tasks.length}
         </Badge>
       </CardHeader>
       <CardContent className="space-y-2">
-        {tasks.length === 0 ? (
+        {query.status === "connecting" ? (
+          <ConnectingEmpty text="Loading tasks…" />
+        ) : query.status === "error" ? (
+          <div className="space-y-2 py-2">
+            <LiveErrorBanner
+              error={query.error}
+              retry={query.retry}
+              message="Required actions could not be streamed."
+            />
+          </div>
+        ) : tasks.length === 0 ? (
           <p className="text-muted-foreground py-6 text-center text-sm">
             All caught up! No actions required.
           </p>
         ) : (
           tasks.map((task) => {
             const ui = STATUS_UI[task.status]
+            // Task IDs are only unique *per employee subcollection* — compose
+            // them so two employees with the same task ID never collide.
+            const key = `${task.employeeId ?? "unknown-employee"}::${task.id}`
             return (
               <div
-                key={task.id}
+                key={key}
                 className="border-border flex items-center justify-between gap-3 rounded-lg border p-3 text-sm"
               >
                 <div className="min-w-0">
@@ -223,7 +312,7 @@ function ComplianceAlertsCard({ alerts }: { alerts: ComplianceAlert[] }) {
         ) : (
           alerts.slice(0, 8).map((alert) => (
             <div
-              key={`${alert.category}-${alert.id}`}
+              key={`${alert.category}::${alert.employeeId}::${alert.id}`}
               className="border-border flex items-center justify-between gap-3 rounded-lg border p-3 text-sm"
             >
               <div className="min-w-0">
@@ -246,14 +335,24 @@ function ComplianceAlertsCard({ alerts }: { alerts: ComplianceAlert[] }) {
 
 /* ── employee progress ─────────────────────────────────────────────────── */
 
-function EmployeeProgressTable({ employees }: { employees: AdminEmployeeProgress[] }) {
+function EmployeeProgressTable({ query }: { query: LiveQueryResult<AdminEmployeeProgress[]> }) {
+  const employees = query.data
+
   return (
     <Card>
       <CardHeader>
         <CardTitle className="text-base">Employee Progress</CardTitle>
       </CardHeader>
       <CardContent>
-        {employees.length === 0 ? (
+        {query.status === "connecting" ? (
+          <ConnectingEmpty text="Loading employees…" />
+        ) : query.status === "error" ? (
+          <LiveErrorBanner
+            error={query.error}
+            retry={query.retry}
+            message="Employee progress could not be streamed."
+          />
+        ) : employees.length === 0 ? (
           <p className="text-muted-foreground py-6 text-center text-sm">
             No active employees yet — add them from the Directory.
           </p>
@@ -319,7 +418,7 @@ function ProgressBar({ value }: { value: number }) {
   )
 }
 
-/* ── helpers ───────────────────────────────────────────────────────────── */
+/* ── helpers & tone badge ──────────────────────────────────────────────── */
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Number.isFinite(value) ? value : 0))

@@ -148,11 +148,57 @@ export function subscribeAdminDashboardStats(
 /* ══ 2. Action-required tasks ═══════════════════════════════════════════ */
 
 /**
+ * Stream limits for the action-required task query.
+ * Primary: pending (isCompleted==false) tasks, server-ordered by recency,
+ *   limit 50 — enough headroom that older pending tasks are kept even when
+ *   many tasks were completed recently (the correctness fix vs Flutter).
+ * Fallback: legacy newest-25 while the composite index is not available.
+ */
+export const ACTION_REQUIRED_PRIMARY_LIMIT = 50
+export const ACTION_REQUIRED_FALLBACK_LIMIT = 25
+
+/**
+ * Parses/sub-categorizes a task document — the subset of
+ * OnboardingTaskDTO.fromFirestore the dashboard consumes. Exported pure so
+ * mapping can be unit-tested.
+ */
+export function mapActionTask(
+  id: string,
+  data: DocumentData,
+): ActionRequiredTask {
+  const status = parseTaskStatus(data.status)
+  const rawSource = typeof data.taskSource === "string" ? data.taskSource : "onboarding"
+
+  return {
+    id,
+    title: typeof data.title === "string" && data.title.length > 0 ? data.title : "Untitled task",
+    employeeId: str(data.employeeId),
+    employeeName: str(data.employeeName, "Unknown"),
+    status,
+    isCompleted: data.isCompleted === true,
+    dueDate: toDate(data.dueDate),
+    updatedAt: toDate(data.updatedAt),
+    taskSource:
+      rawSource === "training" ? "training" : rawSource === "clearance" ? "clearance" : "onboarding",
+  }
+}
+
+/**
  * Streams onboarding tasks that need admin action.
- * Mirrors the Flutter implementation: collectionGroup query ordered by
- * `updatedAt desc` limited to 25 NEWEST, statuses filtered in memory
- * (Firestore can not combine `in` + orderBy without composite indexes,
- * same trade-off as the app).
+ *
+ * Correctness fix vs the Flutter app: the old query fetched the 25 NEWEST
+ * tasks regardless of completion and filtered statuses in memory — so a
+ * burst of recently-completed tasks could hide OLDER pending approvals.
+ * Now:
+ *
+ *  primary  → `adminId == me` + `isCompleted == false`, ordered
+ *             `updatedAt desc` (server-side), limit 50.
+ *             Requires the composite index:
+ *             adminId ASC, isCompleted ASC, updatedAt DESC — add it
+ *             once (Firebase console / firebase CLI) for full correctness.
+ *  fallback → legacy newest-25 + in-memory status filter, used ONLY when
+ *             the composite index is missing (soft-degrade with a warning
+ *             so behavior matches the Flutter app until the index exists).
  */
 export function subscribeAdminActionRequiredTasks(
   adminId: string,
@@ -160,49 +206,82 @@ export function subscribeAdminActionRequiredTasks(
   onError: (error: Error) => void,
 ): Unsubscribe {
   const db = getFirebaseFirestore()
+  const group = collectionGroup(db, FIREBASE_COLLECTIONS.onboardingTasks)
 
-  return onSnapshot(
-    query(
-      collectionGroup(db, FIREBASE_COLLECTIONS.onboardingTasks),
-      where("adminId", "==", adminId),
-      orderBy("updatedAt", "desc"),
-      limit(25),
-    ),
+  const primaryQuery = query(
+    group,
+    where("adminId", "==", adminId),
+    where("isCompleted", "==", false),
+    orderBy("updatedAt", "desc"),
+    limit(ACTION_REQUIRED_PRIMARY_LIMIT),
+  )
+  const fallbackQuery = query(
+    group,
+    where("adminId", "==", adminId),
+    orderBy("updatedAt", "desc"),
+    limit(ACTION_REQUIRED_FALLBACK_LIMIT),
+  )
+
+  let stopped = false
+  let fallbackUnsub: Unsubscribe | null = null
+
+  // Status filtering remains in memory both paths (Firestore cannot combine
+  // a status `in` list with `orderBy updatedAt` without a second composite
+  // index — same reason the Flutter app filtered client-side).
+  const actionFilter = (task: ActionRequiredTask) =>
+    ACTION_REQUIRED_STATUSES.includes(task.status)
+
+  const primaryUnsub = onSnapshot(
+    primaryQuery,
     (snapshot) => {
-      const tasks: ActionRequiredTask[] = []
-
-      for (const doc of snapshot.docs) {
-        try {
-          const data = doc.data()
-          const status = parseTaskStatus(data.status)
-          // Skip documents that are not sub-tasks (overridden by the same
-          // guard the Flutter service applies via the parse failure).
-          if (!Array.isArray(data.formSchema) && typeof data.title !== "string") {
-            continue
-          }
-
-          if (ACTION_REQUIRED_STATUSES.includes(status)) {
-            tasks.push({
-              id: doc.id,
-              title: typeof data.title === "string" ? data.title : "Untitled task",
-              employeeId: str(data.employeeId),
-              employeeName: str(data.employeeName, "Unknown"),
-              status,
-              isCompleted: data.isCompleted === true,
-              dueDate: toDate(data.dueDate),
-              updatedAt: toDate(data.updatedAt),
-              taskSource: str(data.taskSource) === "training" ? "training" : str(data.taskSource) === "clearance" ? "clearance" : "onboarding",
-            })
-          }
-        } catch (error) {
-          // Malformed historical documents are skipped, not fatal.
-          console.warn("[dashboard-stream] failed to parse document", doc.id, error)
-        }
-      }
-
-      onData(tasks)
+      emit(
+        snapshot.docs
+          .map((doc) => mapActionTask(doc.id, doc.data()))
+          .filter(actionFilter),
+      )
     },
-    onError,
+    (error) => {
+      if (stopped) {
+        return
+      }
+      // Composite index not created yet → soft-degrade to the legacy
+      // behavior instead of failing the whole dashboard.
+      if (isIndexCompatibilityError(error) && !fallbackUnsub) {
+        console.warn(
+          "[dashboard-stream] action-required query needs composite index " +
+            "(adminId ASC, isCompleted ASC, updatedAt DESC). " +
+            "Falling back to newest-25 + in-memory filter until then.",
+        )
+        fallbackUnsub = onSnapshot(
+          fallbackQuery,
+          (snapshot) => emit(snapshot.docs.map((doc) => mapActionTask(doc.id, doc.data())).filter(actionFilter)),
+          onError,
+        )
+        return
+      }
+      onError(error)
+    },
+  )
+
+  // Local pass-through for readability below.
+  function emit(tasks: ActionRequiredTask[]): void {
+    onData(tasks)
+  }
+
+  return () => {
+    stopped = true
+    primaryUnsub()
+    fallbackUnsub?.()
+  }
+}
+
+/** Detects "requires composite index" style Firestore errors. */
+export function isIndexCompatibilityError(error: unknown): boolean {
+  const code = (error as { code?: string })?.code ?? ""
+  const message = String((error as Error)?.message ?? "")
+  return (
+    code === "failed-precondition" ||
+    /requires.*(composite )?index|index.*(not|is not).{0,20}(found|available|created)|failed.?precondition/i.test(message)
   )
 }
 

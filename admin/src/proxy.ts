@@ -21,11 +21,25 @@ import { isSafeRedirectTarget } from "@/lib/auth/redirect"
 const LOGIN_PATH = "/login"
 
 export function proxy(request: NextRequest) {
-  const { pathname, search } = request.nextUrl
+  const { pathname } = request.nextUrl
   const hasSessionCookie = request.cookies.has(SESSION_COOKIE)
 
-  // A signed-in-ish visitor arriving at /login goes to their target.
+  // A signed-in-ish visitor arriving at /login goes to their target…
   if (pathname === LOGIN_PATH) {
+    const state = request.nextUrl.searchParams.get("state")
+
+    // …UNLESS they were JUST rejected by a guarded page (?state=expired):
+    // without this, valid-looking stale cookie → /login → dashboard →
+    // /login forever. Clear the dead cookie so a fresh login works, and
+    // render the login form normally this time. (Only the exact value
+    // produced by the guarded pages' redirect is honored.)
+    const isExpiredHandoff = hasSessionCookie && state === "expired"
+
+    if (isExpiredHandoff) {
+      const response = NextResponse.next()
+      response.cookies.delete(SESSION_COOKIE)
+      return response
+    }
     if (hasSessionCookie) {
       const requested = safeRequestedRedirect(request.nextUrl)
       return NextResponse.redirect(new URL(requested, request.url))
@@ -40,6 +54,7 @@ export function proxy(request: NextRequest) {
   if (isProtected && !hasSessionCookie) {
     const loginUrl = new URL(LOGIN_PATH, request.url)
     // Validate/normalize what we echo to prevent redirect-parameter abuse.
+    const search = request.nextUrl.search
     const target = isSafeRedirectTarget(`${pathname}${search}`)
       ? `${pathname}${search}`
       : "/dashboard"

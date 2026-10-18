@@ -185,6 +185,40 @@ re-subscribes with the next page size (older approvals become reachable;
 a full page of real approvals always offers this). Compliance alerts are
 derived from the current page: while the page is partial the alerts panel
 explicitly says it is **not** a complete compliance assessment.
+### Employee provisioning — the joint callable + client result
+
+The `registerStaff` callable creates the Auth account + `users/{uid}` doc +
+welcome notification AND writes a small **legacy subset** (4 minimal
+onboarding tasks incl. `personal_details` / `employee_handbook`, plus one
+`hipaa_compliance` training). The admin panel then provisions the FULL Dart
+template set and resolves that legacy subset in the same batch, so a
+web-registered employee ends with exactly **46 onboarding tasks + 19
+trainings + 4 clearances**. Rules (see `employee-actions.ts`):
+
+- IDs: onboarding tasks use the `create()` slug, trainings use the
+  **different** `_createTraining` slug (dash stays a dash: `skills-streaming`,
+  not `skills_streaming`) — see `seed-templates.ts`.
+- Overlapping callable docs (acknowledgment form, offer letter) are upgraded
+  **in place**: descriptive/ownership fields merged, status/updatedAt
+  preserved.
+- Legacy extras are removed only when **pristine** (no progress); docs that
+  already hold employee work are retained and shown as a completion note.
+- If provisioning fails, the account still exists: the dialog shows
+  **"Account created — setup incomplete"** with the reason, keeps the
+  uid + password link, and **Complete setup** retries for the SAME uid
+  (`completeEmployeeSetup` — fill-missing + overlay-only, idempotent).
+  Both batch construction and commit failures land in this path.
+- `updateEmployee` validates the employee is still active **inside the
+  write transaction** (a deactivation racing the edit cannot bypass it).
+
+### Directory error vs empty state
+
+Empty-directory / empty-filter / search-miss texts render only after a
+**successful, ready** read. A failed read shows the error banner + Retry;
+cards retained from the last successful update are labelled stale and no
+empty-state message is shown.
+
+
 
 ## Deploy
 

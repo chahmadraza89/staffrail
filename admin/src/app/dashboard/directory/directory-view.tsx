@@ -9,6 +9,7 @@ import {
   FilePenLine,
   Loader2,
   Search,
+  TriangleAlert,
   UserRoundSearch,
   X,
 } from "lucide-react"
@@ -27,6 +28,7 @@ import {
   type DirectoryFilter,
 } from "@/lib/admin/directory-format"
 import {
+  completeEmployeeSetup,
   deactivateEmployee,
   registerStaff,
   updateEmployee,
@@ -76,8 +78,9 @@ export function DirectoryView({
   const [filter, setFilter] = useState<DirectoryFilter>(DEFAULT_DIRECTORY_FILTER)
   const [search, setSearch] = useState("")
   const [addOpen, setAddOpen] = useState(false)
-  const [editTarget, setEditTarget] = useState<AdminEmployeeProgress | null>(null)
+  const [editTargetUid, setEditTargetUid] = useState<string | null>(null)
   const [confirmTarget, setConfirmTarget] = useState<AdminEmployeeProgress | null>(null)
+  const [staleNoticeDismissedFor, setStaleNoticeDismissedFor] = useState<string | null>(null)
 
   const subscribe = useCallback(
     (ctrl: Parameters<typeof subscribeAdminEmployeesProgress>[1]) =>
@@ -98,6 +101,46 @@ export function DirectoryView({
     [employees.data, filter, search],
   )
 
+  const editEmployee = useMemo(
+    () => employees.data.find((employee) => employee.uid === editTargetUid) ?? null,
+    [employees.data, editTargetUid],
+  )
+
+  // Staleness is DERIVED from the live stream (no effect, no ref): the
+  // moment the stream reports the edit target as deactivated or removed,
+  // the dialog closes reactively and a notice explains why — nothing
+  // lingers as a stale form.
+  const editStaleKind: "missing" | "deactivated" | null =
+    editTargetUid === null
+      ? null
+      : !editEmployee
+        ? "missing"
+        : !editEmployee.isActive
+          ? "deactivated"
+          : null
+  const showStaleEditNotice =
+    editStaleKind !== null && editTargetUid !== staleNoticeDismissedFor
+  const staleEditNoticeText =
+    editStaleKind === "deactivated"
+      ? `${editEmployee?.name ?? "This employee"} was deactivated — deactivated employees can no longer be edited, so the form was closed.`
+      : "This employee no longer exists — the edit form was closed."
+
+  const cards = (
+    <GridWrapper>
+      {visible.map((employee) => (
+        <ProfileCard
+          key={employee.uid}
+          employee={employee}
+          onEdit={() => {
+            setStaleNoticeDismissedFor(null)
+            setEditTargetUid(employee.uid)
+          }}
+          onDeactivate={() => setConfirmTarget(employee)}
+        />
+      ))}
+    </GridWrapper>
+  )
+
   return (
     <div className="space-y-6">
       <header className="flex flex-wrap items-end justify-between gap-3">
@@ -110,6 +153,24 @@ export function DirectoryView({
           Add New Staff
         </Button>
       </header>
+
+      {showStaleEditNotice ? (
+        <div
+          role="status"
+          data-testid="stale-edit-notice"
+          className="flex items-start justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700"
+        >
+          <TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />
+          <p className="flex-1">{staleEditNoticeText}</p>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => setStaleNoticeDismissedFor(editTargetUid)}
+          >
+            Dismiss
+          </Button>
+        </div>
+      ) : null}
 
       <div className="flex flex-wrap items-center gap-3">
         <FilterChips value={filter} onChange={setFilter} />
@@ -125,12 +186,25 @@ export function DirectoryView({
         </div>
       </div>
 
-      {employees.status === "error" ? (
-        <LiveErrorCard error={employees.error} retry={employees.retry} />
-      ) : null}
-
       {employees.status === "connecting" ? (
         <ConnectingGrid />
+      ) : employees.status === "error" ? (
+        // A failed read NEVER falls through to an empty-state message —
+        // empty results are only claimed after a successful, ready read.
+        <>
+          <LiveErrorCard error={employees.error} retry={employees.retry} />
+          {visible.length > 0 ? (
+            <>
+              <p
+                data-testid="directory-stale-note"
+                className="text-muted-foreground text-xs"
+              >
+                These cards are stale — retained from the last successful update. Retry to refresh.
+              </p>
+              {cards}
+            </>
+          ) : null}
+        </>
       ) : visible.length === 0 ? (
         <EmptyState
           hasAnyEmployees={employees.data.length > 0}
@@ -138,16 +212,7 @@ export function DirectoryView({
           searching={search.trim().length > 0}
         />
       ) : (
-        <GridWrapper>
-          {visible.map((employee) => (
-            <ProfileCard
-              key={employee.uid}
-              employee={employee}
-              onEdit={() => setEditTarget(employee)}
-              onDeactivate={() => setConfirmTarget(employee)}
-            />
-          ))}
-        </GridWrapper>
+        cards
       )}
 
       <AddEmployeeDialog
@@ -157,8 +222,9 @@ export function DirectoryView({
       />
 
       <EditEmployeeDialog
-        employee={editTarget}
-        onClose={() => setEditTarget(null)}
+        open={editTargetUid !== null && editEmployee !== null && editEmployee.isActive}
+        employee={editEmployee}
+        onClose={() => setEditTargetUid(null)}
       />
 
       <DeactivateConfirmDialog
@@ -401,19 +467,28 @@ function AddEmployeeDialog({
   const [email, setEmail] = useState("")
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [result, setResult] = useState<{ uid: string; resetLink: string | null } | null>(null)
-  const [copied, setCopied] = useState(false)
+  const [result, setResult] = useState<{ uid: string; resetLink: string | null; retainedLegacy?: string[] } | null>(null)
+  /** Account created but document setup failed — uid + link are preserved. */
+  const [incomplete, setIncomplete] = useState<{
+    uid: string
+    resetLink: string | null
+    error: string
+  } | null>(null)
+  const [retrying, setRetrying] = useState(false)
+  const [retryError, setRetryError] = useState<string | null>(null)
 
   const reset = () => {
     setName("")
     setEmail("")
     setError(null)
     setResult(null)
-    setCopied(false)
+    setIncomplete(null)
+    setRetrying(false)
+    setRetryError(null)
   }
 
   const handleClose = () => {
-    if (!submitting) {
+    if (!submitting && !retrying) {
       onClose()
       // Reset after the dialog animation window to avoid a visual flash.
       setTimeout(reset, 150)
@@ -438,9 +513,21 @@ function AddEmployeeDialog({
         email: email.trim(),
         adminUid,
       })
-      setResult(registered)
-      setName("")
-      setEmail("")
+      if (registered.setup === "incomplete") {
+        // The Auth account EXISTS — keep the uid + password link visible
+        // and offer the in-dialog retry (never shown as a failure).
+        setIncomplete({
+          uid: registered.uid,
+          resetLink: registered.resetLink,
+          error: registered.setupError ?? "Employee setup could not be completed.",
+        })
+        setName("")
+        setEmail("")
+      } else {
+        setResult(registered)
+        setName("")
+        setEmail("")
+      }
     } catch (caught) {
       setError(
         caught instanceof EmployeeActionError ? caught.message : "Staff registration failed.",
@@ -450,42 +537,52 @@ function AddEmployeeDialog({
     }
   }
 
+  /** Retry that completes setup for the SAME uid — no second Auth account. */
+  const handleCompleteSetup = async () => {
+    if (!incomplete) {
+      return
+    }
+    setRetrying(true)
+    setRetryError(null)
+    try {
+      const outcome = await completeEmployeeSetup({ uid: incomplete.uid, adminUid })
+      setResult({
+        uid: incomplete.uid,
+        resetLink: incomplete.resetLink,
+        ...(outcome.retainedLegacy.length > 0 ? { retainedLegacy: outcome.retainedLegacy } : {}),
+      })
+      setIncomplete(null)
+    } catch (caught) {
+      setRetryError(
+        caught instanceof EmployeeActionError
+          ? caught.message
+          : "Completing setup failed. Try again.",
+      )
+    } finally {
+      setRetrying(false)
+    }
+  }
+
   return (
     <Dialog open={open} onOpenChange={(next) => (next ? undefined : handleClose())}>
       <DialogContent data-testid="add-employee-dialog">
         {result ? (
-          <>
-            <DialogHeader>
-              <DialogTitle>Staff Registered</DialogTitle>
-            </DialogHeader>
-            <p className="text-muted-foreground text-sm">
-              The account <strong>{result.uid}</strong> was created. Send the employee their
-              password setup link (shown once):
-            </p>
-            <div className="border-border bg-muted/40 flex items-start gap-2 rounded-md border p-3 text-xs">
-              <span className="min-w-0 flex-1 break-all">{result.resetLink ?? "(no link returned)"}</span>
-              {result.resetLink ? (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={async () => {
-                    try {
-                      await navigator.clipboard.writeText(result.resetLink ?? "")
-                      setCopied(true)
-                    } catch {
-                      setCopied(false)
-                    }
-                  }}
-                >
-                  <Copy className="mr-1.5 size-3.5" />
-                  {copied ? "Copied" : "Copy"}
-                </Button>
-              ) : null}
-            </div>
-            <Button className="w-full" onClick={handleClose}>
-              Done
-            </Button>
-          </>
+          <RegisteredSuccessPanel
+            uid={result.uid}
+            resetLink={result.resetLink}
+            retainedLegacy={result.retainedLegacy}
+            onClose={handleClose}
+          />
+        ) : incomplete ? (
+          <SetupIncompletePanel
+            uid={incomplete.uid}
+            resetLink={incomplete.resetLink}
+            error={incomplete.error}
+            retryError={retryError}
+            retrying={retrying}
+            onComplete={handleCompleteSetup}
+            onClose={handleClose}
+          />
         ) : (
           <>
             <DialogHeader>
@@ -536,10 +633,145 @@ function AddEmployeeDialog({
   )
 }
 
+function ResetLinkCopyBox({
+  uid,
+  resetLink,
+  label,
+}: {
+  uid: string
+  resetLink: string | null
+  label: string
+}) {
+  const [copied, setCopied] = useState(false)
+  return (
+    <div className="space-y-2">
+      <p className="text-sm">
+        The account <strong>{uid}</strong> was created. {label}
+      </p>
+      <div className="border-border bg-muted/40 flex items-start gap-2 rounded-md border p-3 text-xs">
+        <span className="min-w-0 flex-1 break-all">{resetLink ?? "(no link returned)"}</span>
+        {resetLink ? (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={async () => {
+              try {
+                await navigator.clipboard.writeText(resetLink)
+                setCopied(true)
+              } catch {
+                setCopied(false)
+              }
+            }}
+          >
+            <Copy className="mr-1.5 size-3.5" />
+            {copied ? "Copied" : "Copy"}
+          </Button>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
+function RegisteredSuccessPanel({
+  uid,
+  resetLink,
+  retainedLegacy,
+  onClose,
+}: {
+  uid: string
+  resetLink: string | null
+  retainedLegacy?: string[]
+  onClose: () => void
+}) {
+  return (
+    <>
+      <DialogHeader>
+        <DialogTitle>Staff Registered</DialogTitle>
+      </DialogHeader>
+      <ResetLinkCopyBox
+        uid={uid}
+        resetLink={resetLink}
+        label="Send the employee their password setup link (shown once):"
+      />
+      {retainedLegacy?.length ? (
+        <p className="text-muted-foreground text-xs">
+          Note: {retainedLegacy.length} pre-registration document
+          {retainedLegacy.length === 1 ? "" : "s"} kept because they already contain employee
+          progress.
+        </p>
+      ) : null}
+      <Button className="w-full" onClick={onClose}>
+        Done
+      </Button>
+    </>
+  )
+}
+
+function SetupIncompletePanel({
+  uid,
+  resetLink,
+  error,
+  retryError,
+  retrying,
+  onComplete,
+  onClose,
+}: {
+  uid: string
+  resetLink: string | null
+  error: string
+  retryError: string | null
+  retrying: boolean
+  onComplete: () => void
+  onClose: () => void
+}) {
+  return (
+    <>
+      <DialogHeader>
+        <DialogTitle>Account created — setup incomplete</DialogTitle>
+      </DialogHeader>
+      <div
+        role="alert"
+        data-testid="setup-incomplete-warning"
+        className="border-amber-200 bg-amber-50 rounded-md border p-3 text-sm text-amber-700"
+      >
+        <p>
+          The staff account <strong>{uid}</strong> exists, but its onboarding documents could not
+          be set up.
+        </p>
+        <p className="mt-1 text-xs">Reason: {error}</p>
+        <p className="mt-1 text-xs">
+          Nothing was lost — completing setup continues with the SAME account.
+        </p>
+      </div>
+      <ResetLinkCopyBox
+        uid={uid}
+        resetLink={resetLink}
+        label="The password setup link is kept below (shown once):"
+      />
+      {retryError ? (
+        <p role="alert" className="text-destructive text-sm">
+          {retryError}
+        </p>
+      ) : null}
+      <div className="flex justify-end gap-2">
+        <Button type="button" variant="outline" onClick={onClose} disabled={retrying}>
+          Close
+        </Button>
+        <Button onClick={onComplete} disabled={retrying}>
+          {retrying ? <Loader2 className="mr-2 size-4 animate-spin" /> : <CircleUser className="mr-2 size-4" />}
+          Complete setup
+        </Button>
+      </div>
+    </>
+  )
+}
+
 function EditEmployeeDialog({
+  open,
   employee,
   onClose,
 }: {
+  open: boolean
   employee: AdminEmployeeProgress | null
   onClose: () => void
 }) {
@@ -578,7 +810,7 @@ function EditEmployeeDialog({
   }
 
   return (
-    <Dialog open={employee !== null} onOpenChange={(next) => (next ? undefined : onClose())}>
+    <Dialog open={open} onOpenChange={(next) => (next ? undefined : onClose())}>
       <DialogContent data-testid="edit-employee-dialog" key={employee?.uid ?? "none"}>
         <DialogHeader>
           <DialogTitle>Edit Employee</DialogTitle>

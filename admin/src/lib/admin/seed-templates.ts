@@ -36,11 +36,11 @@ export interface ClearanceTemplate {
 }
 
 /**
- * Exact replica of the Dart slug in OnboardingConstants.create:
- * lowercase → spaces→_, '/'→_, strip ( ) , → '-'→_, ’→' .
+ * Exact replica of the Dart slug in OnboardingConstants.create (onboarding
+ * tasks): lowercase → spaces→_, '/'→_, strip ( ) , → '-'→_, ’→' .
  * ORDER MATTERS (e.g. "Tax Documents (I-9)" → "tax_documents_i_9").
  */
-export function slugifyTemplateId(title: string): string {
+export function slugifyTaskId(title: string): string {
   return title
     .toLowerCase()
     .replaceAll(" ", "_")
@@ -52,12 +52,30 @@ export function slugifyTemplateId(title: string): string {
     .replaceAll("’", "'")
 }
 
+/**
+ * Exact replica of the Dart slug in OnboardingConstants._createTraining —
+ * a DIFFERENT algorithm from the task slug: lowercase → spaces→_, strip
+ * ( ) → ’→', THEN '/'→_. No comma rule and — load-bearing — NO dash rule,
+ * so "Skills-Streaming" must produce "skills-streaming" (matching both the
+ * Dart output and every training doc already created by the Flutter app),
+ * NOT "skills_streaming".
+ */
+export function slugifyTrainingId(title: string): string {
+  return title
+    .toLowerCase()
+    .replaceAll(" ", "_")
+    .replaceAll("(", "")
+    .replaceAll(")", "")
+    .replaceAll("’", "'")
+    .replaceAll("/", "_")
+}
+
 function task(
   title: string,
   subtitle: string,
   actionType: TaskActionType,
 ): TaskTemplate {
-  return { id: slugifyTemplateId(title), title, subtitle, actionType }
+  return { id: slugifyTaskId(title), title, subtitle, actionType }
 }
 
 // ── Onboarding tasks (categories from the Flutter source are preserved as
@@ -147,7 +165,7 @@ const TRAINING_DURATIONS: Array<[string, string]> = [
 
 export const DEFAULT_TRAININGS: TrainingTemplate[] = TRAINING_DURATIONS.map(
   ([title, durationText]) => ({
-    id: slugifyTemplateId(title),
+    id: slugifyTrainingId(title),
     title,
     durationText,
   }),

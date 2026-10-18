@@ -23,6 +23,7 @@ vi.mock("@/lib/admin/employee-actions", async (importOriginal) => {
   return {
     ...actual,
     registerStaff: vi.fn(),
+    completeEmployeeSetup: vi.fn(),
     updateEmployee: vi.fn(),
     deactivateEmployee: vi.fn(),
   }
@@ -30,6 +31,7 @@ vi.mock("@/lib/admin/employee-actions", async (importOriginal) => {
 
 const progressSub = vi.mocked(streams.subscribeAdminEmployeesProgress)
 const registerStaffMock = vi.mocked(actions.registerStaff)
+const completeSetupMock = vi.mocked(actions.completeEmployeeSetup)
 const updateEmployeeMock = vi.mocked(actions.updateEmployee)
 const deactivateEmployeeMock = vi.mocked(actions.deactivateEmployee)
 
@@ -66,7 +68,17 @@ beforeEach(() => {
     employeesCtrl = ctrl
     return vi.fn()
   })
-  registerStaffMock.mockResolvedValue({ uid: "e9", resetLink: "https://reset.example" })
+  registerStaffMock.mockResolvedValue({
+    uid: "e9",
+    resetLink: "https://reset.example",
+    setup: "complete",
+  })
+  completeSetupMock.mockResolvedValue({
+    created: 69,
+    overlaid: 0,
+    removed: 3,
+    retainedLegacy: [],
+  })
   updateEmployeeMock.mockResolvedValue()
   deactivateEmployeeMock.mockResolvedValue()
 })
@@ -289,5 +301,180 @@ describe("DirectoryView — lifecycle actions", () => {
     fireEvent.click(screen.getByRole("button", { name: "Deactivated" }))
     expect(screen.getByText("Ahmad Raza")).toBeInTheDocument()
     expect(screen.getByText("Deactivated", { selector: "span" })).toBeInTheDocument()
+  })
+})
+
+describe("DirectoryView — errors are never mislabeled as empty results", () => {
+  it("a failed initial read shows an error + Retry and NO empty-state message", () => {
+    renderDirectory()
+    fire(() =>
+      employeesCtrl.fail("users", Object.assign(new Error("offline"), { code: "unavailable" })),
+    )
+
+    expect(screen.getByText(/Employee list could not be streamed/)).toBeInTheDocument()
+    // "No employees yet…" is reserved for a successful, ready result.
+    expect(
+      screen.queryByText("No employees yet — add your first staff member."),
+    ).not.toBeInTheDocument()
+    expect(screen.queryByTestId("directory-stale-note")).not.toBeInTheDocument()
+  })
+
+  it("a failed update retains the cards labeled stale — still no empty-state text", () => {
+    renderDirectory()
+    fire(() => employeesCtrl.emit("users", [employee({})]))
+    fire(() =>
+      employeesCtrl.fail("users", Object.assign(new Error("offline"), { code: "unavailable" })),
+    )
+
+    expect(screen.getByText(/Employee list could not be streamed/)).toBeInTheDocument()
+    expect(screen.getByTestId("directory-stale-note")).toBeInTheDocument()
+    expect(screen.getByText("Ahmad Raza")).toBeInTheDocument()
+    expect(
+      screen.queryByText("No employees yet — add your first staff member."),
+    ).not.toBeInTheDocument()
+  })
+
+  it("empty states still render normally after a ready read", () => {
+    renderDirectory()
+    fire(() => employeesCtrl.emit("users", []))
+    expect(
+      screen.getByText("No employees yet — add your first staff member."),
+    ).toBeInTheDocument()
+    expect(screen.queryByTestId("directory-stale-note")).not.toBeInTheDocument ()
+  })
+})
+
+describe("DirectoryView — setup recovery (incomplete provisioning)", () => {
+  function fillAddForm() {
+    fireEvent.click(screen.getByRole("button", { name: /add new staff/i }))
+    fireEvent.change(screen.getByPlaceholderText("Full Name"), {
+      target: { value: "New Person" },
+    })
+    fireEvent.change(screen.getByPlaceholderText("e.g. john@example.com"), {
+      target: { value: "new@bhmh.dev" },
+    })
+    fireEvent.submit(screen.getByTestId("add-employee-dialog").querySelector('form[data-testid="add-employee-form"]')!)
+  }
+
+  it("a created account with failed setup shows a warning and retries with the SAME uid", async () => {
+    registerStaffMock.mockResolvedValue({
+      uid: "e9",
+      resetLink: "https://reset.example",
+      setup: "incomplete",
+      setupError: "permission-denied at users/e9",
+    })
+
+    renderDirectory()
+    fire(() => employeesCtrl.emit("users", []))
+    fillAddForm()
+
+    // Visible, actionable warning — NOT an error-style registration failure.
+    expect(await screen.findByTestId("setup-incomplete-warning")).toBeInTheDocument()
+    expect(screen.getByText(/permission-denied at users\/e9/)).toBeInTheDocument()
+    expect(screen.getAllByText("e9").length).toBeGreaterThan(0)
+    // The password-setup link is preserved.
+    expect(screen.getByText("https://reset.example")).toBeInTheDocument()
+    expect(screen.queryByText("Staff Registered")).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole("button", { name: /complete setup/i }))
+
+    await screen.findByText("Staff Registered")
+    expect(completeSetupMock).toHaveBeenCalledWith({ uid: "e9", adminUid: "adm-1" })
+    // Link still shown after recovery.
+    expect(screen.getByText("https://reset.example")).toBeInTheDocument()
+  })
+
+  it("a failed retry keeps the warning and the link visible for another attempt", async () => {
+    registerStaffMock.mockResolvedValue({
+      uid: "e9",
+      resetLink: "https://reset.example",
+      setup: "incomplete",
+      setupError: "quota exceeded",
+    })
+    completeSetupMock.mockRejectedValue(
+      new EmployeeActionError("Network request failed", "unavailable"),
+    )
+
+    renderDirectory()
+    fillAddForm()
+
+    fireEvent.click(await screen.findByRole("button", { name: /complete setup/i }))
+
+    expect(await screen.findByText("Network request failed")).toBeInTheDocument()
+    expect(screen.getByTestId("setup-incomplete-warning")).toBeInTheDocument()
+    expect(screen.getByText("https://reset.example")).toBeInTheDocument()
+  })
+
+  it("retained legacy docs surface as a completion note, not an error", async () => {
+    registerStaffMock.mockResolvedValue({
+      uid: "e9",
+      resetLink: "https://reset.example",
+      setup: "complete",
+      retainedLegacy: ["onboarding_tasks/employee_handbook"],
+    })
+
+    renderDirectory()
+    fillAddForm()
+
+    await screen.findByText("Staff Registered")
+    expect(
+      screen.getByText(
+        /pre-registration document kept because they already contain employee progress/,
+      ),
+    ).toBeInTheDocument()
+  })
+})
+
+describe("DirectoryView — stale edit forms (races with deactivation)", () => {
+  it("deactivation while the dialog is open refreshes: form closes with a visible notice", () => {
+    renderDirectory()
+    fire(() => employeesCtrl.emit("users", [employee({})]))
+
+    fireEvent.click(screen.getAllByRole("button", { name: /edit/i })[0])
+    expect(screen.getByTestId("edit-employee-dialog")).toBeInTheDocument()
+
+    // The live stream reports the deactivation mid-edit.
+    fire(() => employeesCtrl.emit("users", [employee({ isActive: false })]))
+
+    expect(screen.queryByTestId("edit-employee-dialog")).not.toBeInTheDocument()
+    const notice = screen.getByTestId("stale-edit-notice")
+    expect(notice).toHaveTextContent(/Ahmad Raza was deactivated/)
+    // Dismissable.
+    fireEvent.click(screen.getByRole("button", { name: /dismiss/i }))
+    expect(screen.queryByTestId("stale-edit-notice")).not.toBeInTheDocument()
+  })
+
+  it("an edit rejected at the write boundary shows the server message in the dialog", async () => {
+    updateEmployeeMock.mockRejectedValue(
+      new EmployeeActionError(
+        "This employee is deactivated and can no longer be edited.",
+        "employee-inactive",
+      ),
+    )
+    renderDirectory()
+    fire(() => employeesCtrl.emit("users", [employee({})]))
+
+    fireEvent.click(screen.getAllByRole("button", { name: /edit/i })[0])
+    fireEvent.submit(screen.getByTestId("edit-employee-form"))
+
+    await screen.findByText("This employee is deactivated and can no longer be edited.")
+    expect(updateEmployeeMock).toHaveBeenCalledWith({
+      uid: "e1",
+      name: "Ahmad Raza",
+      email: "ahmad@bhmh.dev",
+    })
+  })
+
+  it("a vanished employee closes the edit form with a removal notice", () => {
+    renderDirectory()
+    fire(() => employeesCtrl.emit("users", [employee({})]))
+    fireEvent.click(screen.getAllByRole("button", { name: /edit/i })[0])
+
+    fire(() => employeesCtrl.emit("users", []))
+
+    expect(screen.queryByTestId("edit-employee-dialog")).not.toBeInTheDocument()
+    expect(screen.getByTestId("stale-edit-notice")).toHaveTextContent(
+      /no longer exists — the edit form was closed/,
+    )
   })
 })

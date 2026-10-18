@@ -295,17 +295,29 @@ export async function provisionEmployeeDocuments(
 }
 
 /**
- * Best-effort persistence of the incomplete-setup status so recovery
- * survives closing the dialog, refreshing, or signing in again. Never
- * masks the primary outcome; never stores the reset link.
+ * Setup-status marker — SERVER-PRIMARY:
+ * the deployed `registerStaff` callable writes `setupStatus: "incomplete"`
+ * on the user doc when it creates a web account (request option
+ * `webProvisioning: true`), BEFORE returning success. The provisioning
+ * transaction flips it to `"complete"`; nothing else changes it.
+ *
+ * `ensureSetupStatusIncomplete` is a FALLBACK for accounts registered while
+ * the PREVIOUS callable deployment is still live (no server-side marker):
+ * it fills the field ONLY when it is missing entirely on an existing doc —
+ * it can never overwrite a callable-written `"incomplete"`, nor a
+ * concurrent `"complete"` from a successful retry, so a failed/interrupted
+ * attempt always leaves the original status intact. Once the updated
+ * callable is deployed (`firebase deploy --only functions`), this is a
+ * no-op fast path.
  */
-async function markSetupIncomplete(db: Firestore, uid: string): Promise<void> {
+async function ensureSetupStatusIncomplete(db: Firestore, uid: string): Promise<void> {
   try {
-    await updateDoc(doc(db, FIREBASE_COLLECTIONS.users, uid), {
-      setupStatus: "incomplete",
-    })
+    const snapshot = await getDoc(doc(db, FIREBASE_COLLECTIONS.users, uid))
+    if (snapshot.exists() && snapshot.data()?.setupStatus === undefined) {
+      await updateDoc(snapshot.ref, { setupStatus: "incomplete" })
+    }
   } catch (error) {
-    console.warn("[employee-actions] could not persist the incomplete-setup status:", error)
+    console.warn("[employee-actions] could not fill a missing setup-status marker:", error)
   }
 }
 
@@ -370,7 +382,10 @@ export async function registerStaff(
   let resultUid: string
   let resetLink: string | null = null
   try {
-    const callable = httpsCallable<{ email: string; name: string; role: string }, { uid: string; resetLink?: string | null }>(
+    const callable = httpsCallable<
+      { email: string; name: string; role: string; webProvisioning: boolean },
+      { uid: string; resetLink?: string | null }
+    >(
       functionsInstance,
       "registerStaff",
       { timeout: REGISTER_STAFF_TIMEOUT_MS },
@@ -379,6 +394,11 @@ export async function registerStaff(
       email: input.email,
       name: input.name,
       role: "employee",
+      // Explicit, backward-compatible option: the deployed callable writes
+      // setupStatus:"incomplete" on the user doc BEFORE returning success,
+      // so recovery survives a failed/interrupted provisioning attempt.
+      // Flutter callers omit the option (unchanged behavior).
+      webProvisioning: true,
     })
     if (!result.data?.uid) {
       throw new EmployeeActionError("Registration function returned no account id.", "internal")
@@ -409,8 +429,9 @@ export async function registerStaff(
         : ((setupFailure as { message?: string } | null)?.message ??
           "Employee setup could not be completed.")
     console.warn("[employee-actions] employee document setup warning:", setupFailure)
-    // Persist the incomplete status (durable recovery surface), best-effort.
-    await markSetupIncomplete(firestore, resultUid)
+    // The deployed callable already wrote the incomplete marker before
+    // returning; fill it only when the flag is missing (pre-deploy gap).
+    await ensureSetupStatusIncomplete(firestore, resultUid)
     return { uid: resultUid, resetLink, setup: "incomplete", setupError }
   }
 }
@@ -437,10 +458,11 @@ export async function completeEmployeeSetup(
       adminId: input.adminUid,
     })
   } catch (error) {
-    // Persist the incomplete status so recovery stays reachable from the
-    // Directory card after a failed retry (best-effort), then surface it.
-    if (error instanceof EmployeeActionError && error.code !== "not-found") {
-      await markSetupIncomplete(firestore, input.uid)
+    // No client marker writes here: the server-written (or gap-filled)
+    // status stays exactly as it is; fill only a MISSING marker after a
+    // failed retry, never overwriting a concurrent successful completion.
+    if (!(error instanceof EmployeeActionError && error.code === "not-found")) {
+      await ensureSetupStatusIncomplete(firestore, input.uid)
     }
     throw error
   }

@@ -213,12 +213,20 @@ function seedUserDoc(uid: string): void {
     role: "employee",
     adminId: "adm-1",
     isActive: true,
+    // Written by the (deployed) callable before returning success.
+    setupStatus: "incomplete",
   })
 }
 
 function callableSuccess(uid = "e2", resetLink: string | null = "https://reset"): void {
   mockCallableImpl = async (payload) => {
-    expect(payload).toEqual({ email: "ahmad@bhmh.dev", name: "Ahmad Raza", role: "employee" })
+    // Explicit web-flow option; the callable then writes the server marker.
+    expect(payload).toEqual({
+      email: "ahmad@bhmh.dev",
+      name: "Ahmad Raza",
+      role: "employee",
+      webProvisioning: true,
+    })
     return Promise.resolve({ data: { success: true, uid, resetLink } })
   }
 }
@@ -376,7 +384,7 @@ describe("registerStaff — provisioning never breaks a created account", () => 
     expect(ack.updatedAt).toBe("CF_SERVER_TIMESTAMP")
   })
 
-  it("a transaction abort reports setup:'incomplete', marks the status, preserves uid + reset link", async () => {
+  it("REGRESSION: a transaction abort keeps the server-written incomplete status intact", async () => {
     activateAdmin()
     seedUserDoc("e2")
     callableSuccess()
@@ -393,14 +401,15 @@ describe("registerStaff — provisioning never breaks a created account", () => 
       setup: "incomplete",
     })
     expect(result.setupError).toContain("permission-denied")
-    // The incomplete status is persisted durably (recovery surface) — with
-    // the reset link deliberately NOT stored anywhere.
+    // The marker was written by the deployed callable BEFORE returning —
+    // the failed client provisioning leaves it UNTOUCHED (no
+    // post-failure marker write ran, and the reset link is not stored).
     expect(mockDocStore.get("users/e2")).toMatchObject({ setupStatus: "incomplete" })
-    expect(mockUpdateDocCalls[0]?.ref.path).toBe("users/e2")
-    expect(mockUpdateDocCalls[0]?.data).toEqual({ setupStatus: "incomplete" })
+    expect(mockUpdateDocCalls).toHaveLength(0)
+    expect(mockDocStore.get("users/e2")).not.toHaveProperty("resetLink")
   })
 
-  it("a write construction failure is treated the same as an abort", async () => {
+  it("a write construction failure keeps the server-written status intact too", async () => {
     activateAdmin()
     seedUserDoc("e2")
     callableSuccess()
@@ -411,6 +420,69 @@ describe("registerStaff — provisioning never breaks a created account", () => 
     expect(result).toMatchObject({ uid: "e2", setup: "incomplete", resetLink: "https://reset" })
     expect(result.setupError).toContain("unsupported nested array")
     expect(mockDocStore.get("users/e2")?.setupStatus).toBe("incomplete")
+    expect(mockUpdateDocCalls).toHaveLength(0)
+  })
+
+  it("REGRESSION: the gap-fallback fills ONLY a MISSING marker, never overwrites", async () => {
+    activateAdmin()
+    callableSuccess() // pre-deploy backend: no server-side marker was written
+    mockDocStore.set("users/e2", {
+      name: "Ahmad Raza",
+      email: "ahmad@bhmh.dev",
+      role: "employee",
+      adminId: "adm-1",
+      isActive: true,
+    })
+    mockTransactionError = new Error("abort")
+
+    let result = await actions.registerStaff(SEED_INPUT, mockFunctions as never, mockFirestore as never)
+    expect(result.setup).toBe("incomplete")
+    // Missing field → filled best-effort so recovery is reachable.
+    expect(mockUpdateDocCalls[0]?.data).toEqual({ setupStatus: "incomplete" })
+    expect(mockDocStore.get("users/e2")?.setupStatus).toBe("incomplete")
+
+    // …but a marker from ANOTHER attempt's successful completion is never
+    // overwritten by this attempt's failure handler.
+    mockUpdateDocCalls.length = 0
+    mockDocStore.set("users/e2", {
+      name: "Ahmad Raza",
+      role: "employee",
+      adminId: "adm-1",
+      isActive: true,
+      setupStatus: "complete",
+    })
+    result = await actions.registerStaff(SEED_INPUT, mockFunctions as never, mockFirestore as never)
+    expect(result.setup).toBe("incomplete")
+    expect(mockUpdateDocCalls).toHaveLength(0) // field present → no write
+    expect(mockDocStore.get("users/e2")?.setupStatus).toBe("complete")
+  })
+
+  it("REGRESSION: provisioning AND the fallback client write both fail — status left intact", async () => {
+    activateAdmin()
+    callableSuccess() // pre-deploy backend: no server-side marker exists yet
+    mockDocStore.set("users/e2", {
+      name: "Ahmad Raza",
+      email: "ahmad@bhmh.dev",
+      role: "employee",
+      adminId: "adm-1",
+      isActive: true,
+      // A previous interrupted attempt's best-effort marker: still incomplete
+      setupStatus: "incomplete",
+    })
+    mockTransactionError = new Error("abort")
+    // Any follow-up client write attempt is ALSO rejected by the network —
+    // but no failure handler may overwrite or repair the status wrongly.
+    mockUpdateDocImpl = (reference, data) => {
+      mockUpdateDocCalls.push({ ref: reference, data })
+      return Promise.reject(Object.assign(new Error("offline"), { code: "unavailable" }))
+    }
+
+    const result = await actions.registerStaff(SEED_INPUT, mockFunctions as never, mockFirestore as never)
+    expect(result.setup).toBe("incomplete")
+    // The server-written (here: pre-deploy fallback) "incomplete" survives
+    // untouched — recovery stays reachable once connectivity returns.
+    expect(mockDocStore.get("users/e2")?.setupStatus).toBe("incomplete")
+    expect(mockDocStore.get("users/e2")).not.toHaveProperty("resetLink")
   })
 
   it("REGRESSION: a legacy default signed after the initial read is retained, not erased", async () => {
@@ -523,6 +595,9 @@ describe("completeEmployeeSetup (setup retry)", () => {
       role: "employee",
       adminId: "adm-1",
       isActive: true,
+      // Written by the deployed callable at registration; the successful
+      // retry below must flip it ATOMICALLY, only after provisioning works.
+      setupStatus: "incomplete",
     })
     activateAdmin()
     for (const [id, title] of [
@@ -573,6 +648,9 @@ describe("completeEmployeeSetup (setup retry)", () => {
     expect(storedDocsUnder("e2", "trainings").size).toBe(19)
     expect(storedDocsUnder("e2", "clearance").size).toBe(4)
     expect(outcome.removed).toBe(2) // the callable's legacy onboarding stubs
+    // Recovery marked complete INSIDE the successful provisioning
+    // transaction — atomically with the documents it created.
+    expect(mockDocStore.get("users/e2")?.setupStatus).toBe("complete")
   })
 
   it("retry is idempotent: completed tasks, signatures, uploads survive untouched", async () => {

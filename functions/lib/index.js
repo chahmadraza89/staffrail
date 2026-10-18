@@ -1,10 +1,12 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.notifyEmployeeOnTrainingAssignment = exports.checkDeadlines = exports.notifyAdminClearanceReview = exports.notifyAdminOnboardingReview = exports.migrateOnboardingAcknowledgment = exports.registerStaff = exports.sendBroadcastNotification = void 0;
+exports.registerStaffImplementation = registerStaffImplementation;
 const firestore_1 = require("firebase-functions/v2/firestore");
 const https_1 = require("firebase-functions/v2/https");
 const scheduler_1 = require("firebase-functions/v2/scheduler");
 const admin = require("firebase-admin");
+const staff_user_doc_1 = require("./staff-user-doc");
 admin.initializeApp();
 /**
  * Helper to send targeted push notifications and save to 'notifications' history collection
@@ -110,7 +112,8 @@ exports.sendBroadcastNotification = (0, firestore_1.onDocumentCreated)("messages
  * Registers a new staff member, creates their Auth account,
  * seeds Firestore data, and returns a password reset link.
  */
-exports.registerStaff = (0, https_1.onCall)(async (request) => {
+async function registerStaffImplementation(request) {
+    var _a;
     if (!request.auth) {
         throw new https_1.HttpsError("unauthenticated", "The function must be called while authenticated.");
     }
@@ -120,7 +123,7 @@ exports.registerStaff = (0, https_1.onCall)(async (request) => {
     if ((callerData === null || callerData === void 0 ? void 0 : callerData.role) !== "admin") {
         throw new https_1.HttpsError("permission-denied", "Only admins can register staff.");
     }
-    const { email, name, role = "employee" } = request.data;
+    const { email, name, role = "employee", webProvisioning } = ((_a = request.data) !== null && _a !== void 0 ? _a : {});
     if (!email || !name) {
         throw new https_1.HttpsError("invalid-argument", "Email and name are required.");
     }
@@ -131,22 +134,18 @@ exports.registerStaff = (0, https_1.onCall)(async (request) => {
         });
         const newUid = userRecord.uid;
         const resetLink = await admin.auth().generatePasswordResetLink(email);
-        await admin.firestore().collection("users").doc(newUid).set({
+        // Web flow: the incomplete-setup marker is written HERE, in the same
+        // trusted account-creation flow, BEFORE returning success — never by a
+        // post-failure client write. Flutter callers (no `webProvisioning`
+        // option) get exactly the previous document shape.
+        await admin.firestore().collection("users").doc(newUid).set((0, staff_user_doc_1.buildStaffUserDoc)({
             uid: newUid,
-            email: email,
-            name: name,
-            role: role,
+            email,
+            name,
+            role,
             adminId: callerUid,
-            createdAt: admin.firestore.FieldValue.serverTimestamp(),
-            lastLogin: admin.firestore.FieldValue.serverTimestamp(),
-            isActive: true,
-            notificationPreferences: {
-                pushEnabled: true,
-                emailEnabled: true,
-                taskReminders: true,
-                adminAlerts: true,
-            },
-        });
+            serverTimestamp: admin.firestore.FieldValue.serverTimestamp(),
+        }, { webProvisioning: webProvisioning === true }));
         const onboardingTasks = [
             { id: "onboarding_acknowledgment_form", title: "Onboarding Acknowledgment form", status: "notStarted" },
             { id: "signed_offer_letter", title: "Signed offer letter", status: "notStarted" },
@@ -178,7 +177,12 @@ exports.registerStaff = (0, https_1.onCall)(async (request) => {
         console.error("Error registering staff:", error);
         throw new https_1.HttpsError("internal", error.message || "Failed to register staff.");
     }
-});
+}
+/**
+ * The onCall trigger wraps the (testable) implementation. The response
+ * contract is unchanged: { success, uid, resetLink }.
+ */
+exports.registerStaff = (0, https_1.onCall)(async (request) => registerStaffImplementation(request));
 /**
  * Migration Function: Resets the 'Onboarding Acknowledgment form' for ALL existing employees.
  * This ensures all current users are required to sign the new legal terms.

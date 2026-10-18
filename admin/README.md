@@ -205,14 +205,30 @@ write can erase employee work mid-flight:
   legacy default is deleted only if it is **still pristine** when the
   transaction commits — a signature landing mid-flight is retained and
   reported; transaction retries re-read (revalidate) everything.
-- If provisioning fails, `setupStatus: "incomplete"` is persisted on the
-  user doc (best-effort; never the reset link!) so recovery survives
-  closing the dialog, a refresh, or signing in again: the employee's
-  Directory card shows a **Setup incomplete** badge with a **Complete
+- If provisioning fails, the account still RECOVERS: the **deployed**
+  `registerStaff` callable writes `setupStatus: "incomplete"` on the user
+  doc when it creates a web account (request option `webProvisioning:
+  true`, written before the callable returns success) — so the marker
+  exists even if the browser closes before provisioning runs, and nothing
+  client-side needs to write it after a failure. The web client's only
+  status writes are: (a) a **gap fallback** used only while an OLDER
+  callable deployment is live, which fills the field **only when it is
+  missing entirely** (never overwriting an `"incomplete"` from the callable
+  or a concurrent `"complete"` from a successful retry), and (b) the
+  provisioning transaction flipping it to `"complete"` **only on success**.
+  The Directory card shows a **Setup incomplete** badge with a **Complete
   setup** action that retries the SAME uid (`completeEmployeeSetup` —
   active-admin + ownership checks, idempotent fill-missing/overlay-only
-  provisioning). Failures surface as an actionable banner; the status only
-  flips to `complete` inside the successful provisioning transaction.
+  provisioning). Failures surface as an actionable banner; the reset link
+  is never stored in Firestore or browser storage.
+- **DEPLOYMENT REQUIREMENT:** the server-side marker guarantee (and with
+  it, refresh-proof recovery for a browser closed immediately after
+  registration) requires the updated callable to be deployed:
+  `firebase deploy --only functions`. **The currently deployed backend has
+  NOT been deployed with this change** — until then, web registrations
+  rely on the gap fallback above, which only fills a *missing* marker and
+  cannot rescue a browser closed between account creation and the client
+  marking step.
 - `updateEmployee` validates the employee is still active **inside the
   write transaction** (a deactivation racing the edit cannot bypass it).
 

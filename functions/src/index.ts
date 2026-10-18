@@ -3,6 +3,8 @@ import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { onSchedule } from "firebase-functions/v2/scheduler";
 import * as admin from "firebase-admin";
 
+import { buildStaffUserDoc, type RegisterStaffRequestData } from "./staff-user-doc";
+
 admin.initializeApp();
 
 /**
@@ -126,7 +128,9 @@ export const sendBroadcastNotification = onDocumentCreated(
  * Registers a new staff member, creates their Auth account,
  * seeds Firestore data, and returns a password reset link.
  */
-export const registerStaff = onCall(async (request) => {
+export async function registerStaffImplementation(
+  request: { auth?: { uid: string } | null; data?: unknown },
+): Promise<{ success: boolean; uid: string; resetLink: string }> {
   if (!request.auth) {
     throw new HttpsError("unauthenticated", "The function must be called while authenticated.");
   }
@@ -139,7 +143,8 @@ export const registerStaff = onCall(async (request) => {
     throw new HttpsError("permission-denied", "Only admins can register staff.");
   }
 
-  const { email, name, role = "employee" } = request.data;
+  const { email, name, role = "employee", webProvisioning } =
+    (request.data ?? {}) as RegisterStaffRequestData;
 
   if (!email || !name) {
     throw new HttpsError("invalid-argument", "Email and name are required.");
@@ -154,22 +159,23 @@ export const registerStaff = onCall(async (request) => {
     const newUid = userRecord.uid;
     const resetLink = await admin.auth().generatePasswordResetLink(email);
 
-    await admin.firestore().collection("users").doc(newUid).set({
-      uid: newUid,
-      email: email,
-      name: name,
-      role: role,
-      adminId: callerUid,
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      lastLogin: admin.firestore.FieldValue.serverTimestamp(),
-      isActive: true,
-      notificationPreferences: {
-        pushEnabled: true,
-        emailEnabled: true,
-        taskReminders: true,
-        adminAlerts: true,
-      },
-    });
+    // Web flow: the incomplete-setup marker is written HERE, in the same
+    // trusted account-creation flow, BEFORE returning success — never by a
+    // post-failure client write. Flutter callers (no `webProvisioning`
+    // option) get exactly the previous document shape.
+    await admin.firestore().collection("users").doc(newUid).set(
+      buildStaffUserDoc(
+        {
+          uid: newUid,
+          email,
+          name,
+          role,
+          adminId: callerUid,
+          serverTimestamp: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { webProvisioning: webProvisioning === true },
+      ),
+    );
 
     const onboardingTasks = [
       { id: "onboarding_acknowledgment_form", title: "Onboarding Acknowledgment form", status: "notStarted" },
@@ -218,7 +224,15 @@ export const registerStaff = onCall(async (request) => {
     console.error("Error registering staff:", error);
     throw new HttpsError("internal", error.message || "Failed to register staff.");
   }
-});
+}
+
+/**
+ * The onCall trigger wraps the (testable) implementation. The response
+ * contract is unchanged: { success, uid, resetLink }.
+ */
+export const registerStaff = onCall(async (request) =>
+  registerStaffImplementation(request)
+);
 
 /**
  * Migration Function: Resets the 'Onboarding Acknowledgment form' for ALL existing employees.

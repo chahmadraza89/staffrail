@@ -81,6 +81,12 @@ export function DirectoryView({
   const [editTargetUid, setEditTargetUid] = useState<string | null>(null)
   const [confirmTarget, setConfirmTarget] = useState<AdminEmployeeProgress | null>(null)
   const [staleNoticeDismissedFor, setStaleNoticeDismissedFor] = useState<string | null>(null)
+  const [setupRetryingUid, setSetupRetryingUid] = useState<string | null>(null)
+  const [setupRetryError, setSetupRetryError] = useState<{
+    uid: string
+    name: string
+    message: string
+  } | null>(null)
 
   const subscribe = useCallback(
     (ctrl: Parameters<typeof subscribeAdminEmployeesProgress>[1]) =>
@@ -104,6 +110,35 @@ export function DirectoryView({
   const editEmployee = useMemo(
     () => employees.data.find((employee) => employee.uid === editTargetUid) ?? null,
     [employees.data, editTargetUid],
+  )
+
+  /**
+   * Durable incomplete-setup recovery — retries provisioning for the SAME
+   * uid (never re-registers). `setupStatus` lives on the employee's user
+   * doc, so the indicator survives closing the dialog, refreshing, and
+   * signing in again; the provisioning transaction flips it to "complete"
+   * only on success and the live stream re-renders the card.
+   */
+  const handleCompleteSetup = useCallback(
+    async (uid: string, name: string) => {
+      setSetupRetryingUid(uid)
+      setSetupRetryError(null)
+      try {
+        await completeEmployeeSetup({ uid, adminUid })
+      } catch (caught) {
+        setSetupRetryError({
+          uid,
+          name,
+          message:
+            caught instanceof EmployeeActionError
+              ? caught.message
+              : "Completing setup failed. Try again.",
+        })
+      } finally {
+        setSetupRetryingUid(null)
+      }
+    },
+    [adminUid],
   )
 
   // Staleness is DERIVED from the live stream (no effect, no ref): the
@@ -131,11 +166,13 @@ export function DirectoryView({
         <ProfileCard
           key={employee.uid}
           employee={employee}
+          setupRetryPending={setupRetryingUid === employee.uid}
           onEdit={() => {
             setStaleNoticeDismissedFor(null)
             setEditTargetUid(employee.uid)
           }}
           onDeactivate={() => setConfirmTarget(employee)}
+          onCompleteSetup={() => void handleCompleteSetup(employee.uid, employee.name)}
         />
       ))}
     </GridWrapper>
@@ -185,6 +222,26 @@ export function DirectoryView({
           />
         </div>
       </div>
+
+      {setupRetryError ? (
+        <div
+          role="alert"
+          data-testid="setup-retry-error"
+          className="flex items-center justify-between gap-3 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
+        >
+          <p>
+            Completing setup for <strong>{setupRetryError.name}</strong> failed:{" "}
+            {setupRetryError.message}
+          </p>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => void handleCompleteSetup(setupRetryError.uid, setupRetryError.name)}
+          >
+            Try again
+          </Button>
+        </div>
+      ) : null}
 
       {employees.status === "connecting" ? (
         <ConnectingGrid />
@@ -352,12 +409,16 @@ const TONE_CLASSES = {
 
 function ProfileCard({
   employee,
+  setupRetryPending,
   onEdit,
   onDeactivate,
+  onCompleteSetup,
 }: {
   employee: AdminEmployeeProgress
+  setupRetryPending: boolean
   onEdit: () => void
   onDeactivate: () => void
+  onCompleteSetup: () => void
 }) {
   const phase = getPhase(employee.overallProgress)
   const statusText = employee.isActive
@@ -402,9 +463,30 @@ function ProfileCard({
           <span className={"rounded-md border px-2 py-0.5 text-xs font-medium " + TONE_CLASSES[phase.tone]}>
             {phase.text}
           </span>
+          {employee.setupStatus === "incomplete" ? (
+            <span
+              data-testid={`setup-incomplete-${employee.uid}`}
+              className="border-amber-200 bg-amber-50 text-amber-700 rounded-md border px-2 py-0.5 text-xs font-medium"
+            >
+              Setup incomplete
+            </span>
+          ) : null}
           <span className="flex-1" />
           {employee.isActive ? (
             <>
+              {employee.setupStatus === "incomplete" ? (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={onCompleteSetup}
+                  disabled={setupRetryPending}
+                >
+                  {setupRetryPending ? (
+                    <Loader2 className="mr-1.5 size-3.5 animate-spin" />
+                  ) : null}
+                  Complete setup
+                </Button>
+              ) : null}
               <Button asChild size="sm" variant="secondary">
                 <Link href={`/dashboard/directory/${employee.uid}`}>Details</Link>
               </Button>

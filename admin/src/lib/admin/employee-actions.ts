@@ -6,7 +6,6 @@ import {
   runTransaction,
   serverTimestamp,
   updateDoc,
-  writeBatch,
   type DocumentData,
   type Firestore,
 } from "firebase/firestore"
@@ -155,14 +154,24 @@ function isPristineTraining(data: DocumentData): boolean {
 
 /**
  * Provisions the full Dart template set for an employee and resolves the
- * callable's legacy defaults:
- *  - missing template docs are CREATED with the full DTO-shaped fields;
- *  - existing template docs receive a description/ownership MERGE only
- *    (progress is never overwritten — idempotent, retry-safe);
- *  - pristine legacy defaults are removed; legacy docs with progress are
- *    retained and reported.
- * Both batch construction AND the commit are inside the caller's error
- * boundary — either failing is reported as incomplete setup.
+ * callable's legacy defaults — inside ONE transaction, so nothing can erase
+ * employee work that lands between the initial read and the commit:
+ *
+ *  - ALL documents (templates ×3 + legacy subset + the user doc) are read
+ *    first (Firestore transactions forbid reads after writes);
+ *  - a template is CREATED only if it is still missing at the write
+ *    boundary — if another client created it meanwhile, the transaction
+ *    conflict re-runs the body and the doc is overlaid instead;
+ *  - existing docs receive a description/ownership MERGE only (progress
+ *    never overwritten — idempotent, retry-safe);
+ *  - a legacy default is DELETED only if it is STILL pristine when the
+ *    write commits — a signature that landed mid-flight is retained and
+ *    reported;
+ *  - every retry re-reads (revalidates) all changed documents, so
+ *    signatures, uploads, form data, statuses and timestamps survive.
+ *  - on success the SAME transaction stamps `setupStatus: "complete"` on
+ *    the user doc (never the reset link — that lives only in the callable
+ *    response).
  */
 export async function provisionEmployeeDocuments(
   db: Firestore,
@@ -173,112 +182,131 @@ export async function provisionEmployeeDocuments(
     employeeName: context.name,
     adminId: context.adminId,
   }
-  const assignedAt = new Date()
-  const outcome: ProvisionOutcome = { created: 0, overlaid: 0, removed: 0, retainedLegacy: [] }
 
-  interface PlannedSet {
-    reference: ReturnType<typeof doc>
-    data: Record<string, unknown>
-    merge: boolean
-  }
-  const plannedSets: PlannedSet[] = []
-  const plannedDeletes: Array<ReturnType<typeof doc>> = []
+  return runTransaction(db, async (transaction) => {
+    const assignedAt = new Date()
+    const outcome: ProvisionOutcome = { created: 0, overlaid: 0, removed: 0, retainedLegacy: [] }
 
-  const readExisting = async (collectionName: string, id: string) => {
-    const reference = doc(db, FIREBASE_COLLECTIONS.users, context.uid, collectionName, id)
-    const snapshot = await getDoc(reference)
-    return { reference, exists: snapshot.exists(), data: snapshot.exists() ? (snapshot.data() ?? {}) : null }
-  }
+    // ── Phase 1: read everything before issuing any write ──────────────
+    const usersReference = doc(db, FIREBASE_COLLECTIONS.users, context.uid)
+    const userSnapshot = await transaction.get(usersReference)
+    if (!userSnapshot.exists()) {
+      throw new EmployeeActionError("Employee profile not found.", "not-found")
+    }
 
-  for (const task of DEFAULT_ONBOARDING_TASKS) {
-    const { reference, exists } = await readExisting(FIREBASE_COLLECTIONS.onboardingTasks, task.id)
-    const fields = onboardingTaskFields(task, seedContext)
-    if (!exists) {
-      plannedSets.push({
+    interface ExistingDoc {
+      reference: ReturnType<typeof doc>
+      exists: boolean
+      data: DocumentData | null
+    }
+    const readTemplate = async (collectionName: string, id: string): Promise<ExistingDoc> => {
+      const reference = doc(db, FIREBASE_COLLECTIONS.users, context.uid, collectionName, id)
+      const snapshot = await transaction.get(reference)
+      return {
         reference,
-        data: { ...fields, updatedAt: serverTimestamp() },
-        merge: false,
+        exists: snapshot.exists(),
+        data: snapshot.exists() ? (snapshot.data() ?? {}) : null,
+      }
+    }
+
+    const templateDocs: Array<{ collectionName: string; id: string; doc: ExistingDoc; fields: Record<string, unknown>; overlayKeys: readonly string[] }> = []
+
+    for (const task of DEFAULT_ONBOARDING_TASKS) {
+      templateDocs.push({
+        collectionName: FIREBASE_COLLECTIONS.onboardingTasks,
+        id: task.id,
+        doc: await readTemplate(FIREBASE_COLLECTIONS.onboardingTasks, task.id),
+        fields: onboardingTaskFields(task, seedContext),
+        overlayKeys: TASK_OVERLAY_KEYS,
       })
-      outcome.created += 1
-    } else {
-      plannedSets.push({ reference, data: pickFields(fields, TASK_OVERLAY_KEYS), merge: true })
-      outcome.overlaid += 1
     }
-  }
-
-  for (const training of DEFAULT_TRAININGS) {
-    const { reference, exists } = await readExisting(FIREBASE_COLLECTIONS.trainings, training.id)
-    const fields = trainingFields(training, seedContext, assignedAt)
-    if (!exists) {
-      plannedSets.push({
-        reference,
-        data: { ...fields, updatedAt: serverTimestamp() },
-        merge: false,
+    for (const training of DEFAULT_TRAININGS) {
+      templateDocs.push({
+        collectionName: FIREBASE_COLLECTIONS.trainings,
+        id: training.id,
+        doc: await readTemplate(FIREBASE_COLLECTIONS.trainings, training.id),
+        fields: trainingFields(training, seedContext, assignedAt),
+        overlayKeys: TRAINING_OVERLAY_KEYS,
       })
-      outcome.created += 1
-    } else {
-      plannedSets.push({ reference, data: pickFields(fields, TRAINING_OVERLAY_KEYS), merge: true })
-      outcome.overlaid += 1
     }
-  }
-
-  for (const clearance of DEFAULT_CLEARANCES) {
-    const { reference, exists } = await readExisting(FIREBASE_COLLECTIONS.clearanceItems, clearance.id)
-    const fields = clearanceFields(clearance, seedContext)
-    if (!exists) {
-      plannedSets.push({
-        reference,
-        data: { ...fields, updatedAt: serverTimestamp() },
-        merge: false,
+    for (const clearance of DEFAULT_CLEARANCES) {
+      templateDocs.push({
+        collectionName: FIREBASE_COLLECTIONS.clearanceItems,
+        id: clearance.id,
+        doc: await readTemplate(FIREBASE_COLLECTIONS.clearanceItems, clearance.id),
+        fields: clearanceFields(clearance, seedContext),
+        overlayKeys: CLEARANCE_OVERLAY_KEYS,
       })
-      outcome.created += 1
-    } else {
-      plannedSets.push({ reference, data: pickFields(fields, CLEARANCE_OVERLAY_KEYS), merge: true })
-      outcome.overlaid += 1
     }
-  }
 
-  // Resolve the callable's legacy subset — new-employee provisioning only,
-  // and only when the doc carries no employee work.
-  for (const id of LEGACY_ONBOARDING_DOC_IDS) {
-    const { reference, exists, data } = await readExisting(FIREBASE_COLLECTIONS.onboardingTasks, id)
-    if (!exists) {
-      continue
+    const legacyDocs: Array<{ doc: ExistingDoc; pristine: (data: DocumentData) => boolean }> = []
+    for (const id of LEGACY_ONBOARDING_DOC_IDS) {
+      legacyDocs.push({
+        doc: await readTemplate(FIREBASE_COLLECTIONS.onboardingTasks, id),
+        pristine: isPristineOnboarding,
+      })
     }
-    if (isPristineOnboarding(data ?? {})) {
-      plannedDeletes.push(reference)
-      outcome.removed += 1
-    } else {
-      outcome.retainedLegacy.push(`${FIREBASE_COLLECTIONS.onboardingTasks}/${id}`)
+    for (const id of LEGACY_TRAINING_DOC_IDS) {
+      legacyDocs.push({
+        doc: await readTemplate(FIREBASE_COLLECTIONS.trainings, id),
+        pristine: isPristineTraining,
+      })
     }
-  }
-  for (const id of LEGACY_TRAINING_DOC_IDS) {
-    const { reference, exists, data } = await readExisting(FIREBASE_COLLECTIONS.trainings, id)
-    if (!exists) {
-      continue
-    }
-    if (isPristineTraining(data ?? {})) {
-      plannedDeletes.push(reference)
-      outcome.removed += 1
-    } else {
-      outcome.retainedLegacy.push(`${FIREBASE_COLLECTIONS.trainings}/${id}`)
-    }
-  }
 
-  const batch = writeBatch(db)
-  for (const write of plannedSets) {
-    if (write.merge) {
-      batch.set(write.reference, write.data, { merge: true })
-    } else {
-      batch.set(write.reference, write.data)
+    // ── Phase 2: writes against the just-read boundary ──────────────────
+    for (const entry of templateDocs) {
+      if (!entry.doc.exists) {
+        transaction.set(entry.doc.reference, {
+          ...entry.fields,
+          updatedAt: serverTimestamp(),
+        })
+        outcome.created += 1
+      } else {
+        transaction.set(
+          entry.doc.reference,
+          pickFields(entry.fields, entry.overlayKeys),
+          { merge: true },
+        )
+        outcome.overlaid += 1
+      }
     }
-  }
-  for (const reference of plannedDeletes) {
-    batch.delete(reference)
-  }
-  await batch.commit()
 
-  return outcome
+    // Resolve the callable's legacy subset — deleted only when the doc is
+    // STILL pristine at the write boundary; anything with employee work is
+    // retained (and reported).
+    for (const legacy of legacyDocs) {
+      if (!legacy.doc.exists) {
+        continue
+      }
+      if (legacy.pristine(legacy.doc.data ?? {})) {
+        transaction.delete(legacy.doc.reference)
+        outcome.removed += 1
+      } else {
+        outcome.retainedLegacy.push(legacy.doc.reference.path.split("/").slice(-2).join("/"))
+      }
+    }
+
+    // Setup status flips to complete in the same transaction — only after
+    // every write above is planned successfully.
+    transaction.set(usersReference, { setupStatus: "complete" }, { merge: true })
+
+    return outcome
+  })
+}
+
+/**
+ * Best-effort persistence of the incomplete-setup status so recovery
+ * survives closing the dialog, refreshing, or signing in again. Never
+ * masks the primary outcome; never stores the reset link.
+ */
+async function markSetupIncomplete(db: Firestore, uid: string): Promise<void> {
+  try {
+    await updateDoc(doc(db, FIREBASE_COLLECTIONS.users, uid), {
+      setupStatus: "incomplete",
+    })
+  } catch (error) {
+    console.warn("[employee-actions] could not persist the incomplete-setup status:", error)
+  }
 }
 
 /** Only an admin profile that still exists, is admin, and is active may
@@ -381,6 +409,8 @@ export async function registerStaff(
         : ((setupFailure as { message?: string } | null)?.message ??
           "Employee setup could not be completed.")
     console.warn("[employee-actions] employee document setup warning:", setupFailure)
+    // Persist the incomplete status (durable recovery surface), best-effort.
+    await markSetupIncomplete(firestore, resultUid)
     return { uid: resultUid, resetLink, setup: "incomplete", setupError }
   }
 }
@@ -397,14 +427,23 @@ export async function completeEmployeeSetup(
   db?: Firestore,
 ): Promise<ProvisionOutcome> {
   const firestore = db ?? getFirebaseFirestore()
-  await assertActiveAdmin(firestore, input.adminUid)
-  const employee = await assertEmployeeOwnership(firestore, input.uid, input.adminUid)
-  const name = typeof employee.name === "string" ? employee.name : ""
-  return provisionEmployeeDocuments(firestore, {
-    uid: input.uid,
-    name,
-    adminId: input.adminUid,
-  })
+  try {
+    await assertActiveAdmin(firestore, input.adminUid)
+    const employee = await assertEmployeeOwnership(firestore, input.uid, input.adminUid)
+    const name = typeof employee.name === "string" ? employee.name : ""
+    return await provisionEmployeeDocuments(firestore, {
+      uid: input.uid,
+      name,
+      adminId: input.adminUid,
+    })
+  } catch (error) {
+    // Persist the incomplete status so recovery stays reachable from the
+    // Directory card after a failed retry (best-effort), then surface it.
+    if (error instanceof EmployeeActionError && error.code !== "not-found") {
+      await markSetupIncomplete(firestore, input.uid)
+    }
+    throw error
+  }
 }
 
 /** Updates an existing employee's basic profile (name/email).

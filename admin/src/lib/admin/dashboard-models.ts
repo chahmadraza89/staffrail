@@ -16,6 +16,12 @@ export interface AdminEmployeeProgress {
   clearanceProgress: number
   lastLogin: Date
   isActive: boolean
+  /**
+   * Web-only provisioning status: "incomplete" means the Auth account exists
+   * but its template documents still need `completeEmployeeSetup`. Absent /
+   * "complete" for every normal (and all Flutter-created) employee.
+   */
+  setupStatus?: "complete" | "incomplete"
 }
 
 export type ComplianceAlertCategory = "Overdue" | "Signature Needed"

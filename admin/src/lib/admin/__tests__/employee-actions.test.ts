@@ -18,6 +18,7 @@ import {
 
 type Stored = Record<string, unknown> | undefined
 
+/** In-memory doc store backing every getDoc/transaction read/write. */
 const mockDocStore = new Map<string, Record<string, unknown>>()
 
 interface MockBatchOp {
@@ -26,7 +27,8 @@ interface MockBatchOp {
   data?: Record<string, unknown>
   merge: boolean
 }
-const mockBatchOps: MockBatchOp[] = []
+/** Log of every transaction write (set/delete), kept for assertions. */
+const mockTxWrites: MockBatchOp[] = []
 
 const mockUpdateDocCalls: Array<{ ref: { path: string }; data: Record<string, unknown> }> = []
 
@@ -34,15 +36,19 @@ const mockFirestore = { kind: "firestore" }
 const mockFunctions = { kind: "functions" }
 
 let mockCallableImpl: ((payload: unknown) => Promise<{ data: unknown }>) | null = null
-let mockBatchSetError: Error | null = null
-let mockCommitError: Error | null = null
-/** Simulates ANOTHER client writing between the transaction read and commit. */
+let mockTxSetError: Error | null = null
+/** Aborts the whole transaction before the body runs (commit-level failure). */
+let mockTransactionError: Error | null = null
+/** Simulates ANOTHER client writing between the first transaction read
+ * pass and the commit — exactly once, on the first attempt. */
 let mockTransactionContendHook: (() => void) | null = null
 let mockUpdateDocImpl: (
   reference: { path: string },
   data: Record<string, unknown>,
 ) => Promise<void> = (reference, data) => {
   mockUpdateDocCalls.push({ ref: reference, data })
+  // updateDoc = merge into the store (mirrors Firestore's field merge).
+  mockDocStore.set(reference.path, { ...mockDocStore.get(reference.path), ...data })
   return Promise.resolve()
 }
 
@@ -73,52 +79,20 @@ vi.mock("firebase/firestore", () => {
       ),
     updateDoc: (reference: { path: string }, data: Record<string, unknown>) =>
       mockUpdateDocImpl(reference, data),
-    writeBatch: () => ({
-      set: (
-        reference: { path: string },
-        data: Record<string, unknown>,
-        options?: { merge?: boolean },
-      ) => {
-        if (mockBatchSetError) {
-          throw mockBatchSetError
-        }
-        mockBatchOps.push({
-          type: "set",
-          path: reference.path,
-          data,
-          merge: options?.merge === true,
-        })
-      },
-      delete: (reference: { path: string }) => {
-        mockBatchOps.push({ type: "delete", path: reference.path, merge: false })
-      },
-      commit: () => {
-        if (mockCommitError) {
-          return Promise.reject(mockCommitError)
-        }
-        for (const op of mockBatchOps) {
-          if (op.type === "delete") {
-            mockDocStore.delete(op.path)
-          } else if (op.merge) {
-            mockDocStore.set(op.path, { ...mockDocStore.get(op.path), ...op.data })
-          } else {
-            mockDocStore.set(op.path, { ...op.data })
-          }
-        }
-        // Ops stay recorded (reset in beforeEach) so tests can assert the
-        // planned writes after a successful commit.
-        return Promise.resolve()
-      },
-    }),
     /** Optimistic concurrency: reads snapshot at get() time; a mutation to
-     * any read doc before commit discards the writes and re-runs the body. */
+     * any read doc before commit discards the writes and re-runs the body
+     * (single simultaneous writer, on the first attempt, via the hook).
+     * Transaction writes support set (merge or not) and delete. */
     runTransaction: async (
       _db: unknown,
       transactionFn: (transaction: unknown) => unknown,
     ): Promise<unknown> => {
+      if (mockTransactionError) {
+        return Promise.reject(mockTransactionError)
+      }
       for (let attempt = 0; attempt < 5; attempt += 1) {
         const reads = new Map<string, Stored>()
-        const writes: Array<{ ref: { path: string }; data: Record<string, unknown> }> = []
+        const writes: MockBatchOp[] = []
         const transaction = {
           get: async (reference: { path: string }) => {
             const data = mockDocStore.get(reference.path)
@@ -129,13 +103,43 @@ vi.mock("firebase/firestore", () => {
               ref: reference,
             }
           },
+          set: (
+            reference: { path: string },
+            data: Record<string, unknown>,
+            options?: { merge?: boolean },
+          ) => {
+            if (mockTxSetError) {
+              throw mockTxSetError
+            }
+            const op: MockBatchOp = {
+              type: "set",
+              path: reference.path,
+              data,
+              merge: options?.merge === true,
+            }
+            writes.push(op)
+            mockTxWrites.push(op)
+          },
+          delete: (reference: { path: string }) => {
+            const op: MockBatchOp = { type: "delete", path: reference.path, merge: false }
+            writes.push(op)
+            mockTxWrites.push(op)
+          },
           update: (reference: { path: string }, data: Record<string, unknown>) => {
-            writes.push({ ref: reference, data })
+            writes.push({
+              type: "set",
+              path: reference.path,
+              data,
+              merge: true,
+            })
           },
         }
         // App-thrown errors abort the transaction and propagate.
         const outcome = await transactionFn(transaction)
-        mockTransactionContendHook?.()
+        // Single racing writer between the first read pass and the commit.
+        if (attempt === 0) {
+          mockTransactionContendHook?.()
+        }
         const conflict = [...reads.entries()].some(
           ([path, seen]) => mockDocStore.get(path) !== seen,
         )
@@ -143,7 +147,13 @@ vi.mock("firebase/firestore", () => {
           continue // writes discarded, transaction body re-runs
         }
         for (const write of writes) {
-          mockDocStore.set(write.ref.path, { ...mockDocStore.get(write.ref.path), ...write.data })
+          if (write.type === "delete") {
+            mockDocStore.delete(write.path)
+          } else if (write.merge) {
+            mockDocStore.set(write.path, { ...mockDocStore.get(write.path), ...write.data })
+          } else {
+            mockDocStore.set(write.path, { ...write.data })
+          }
         }
         return outcome
       }
@@ -171,14 +181,15 @@ vi.mock("firebase/functions", () => ({
 
 beforeEach(() => {
   mockDocStore.clear()
-  mockBatchOps.length = 0
+  mockTxWrites.length = 0
   mockUpdateDocCalls.length = 0
   mockCallableImpl = null
-  mockBatchSetError = null
-  mockCommitError = null
+  mockTxSetError = null
+  mockTransactionError = null
   mockTransactionContendHook = null
   mockUpdateDocImpl = (reference, data) => {
     mockUpdateDocCalls.push({ ref: reference, data })
+    mockDocStore.set(reference.path, { ...mockDocStore.get(reference.path), ...data })
     return Promise.resolve()
   }
   vi.spyOn(console, "warn").mockImplementation(() => {})
@@ -189,6 +200,20 @@ const SEED_INPUT = { name: "Ahmad Raza", email: "ahmad@bhmh.dev", adminUid: "adm
 /** The signed-in admin's user doc — provisioning requires an active admin. */
 function activateAdmin(): void {
   mockDocStore.set("users/adm-1", { name: "Admin", role: "admin", isActive: true })
+}
+
+/**
+ * The employee's user doc the `registerStaff` callable creates BEFORE the
+ * client provisions documents (always exists at provisioning time).
+ */
+function seedUserDoc(uid: string): void {
+  mockDocStore.set(`users/${uid}`, {
+    name: "Ahmad Raza",
+    email: "ahmad@bhmh.dev",
+    role: "employee",
+    adminId: "adm-1",
+    isActive: true,
+  })
 }
 
 function callableSuccess(uid = "e2", resetLink: string | null = "https://reset"): void {
@@ -209,13 +234,18 @@ function storedDocsUnder(worker: string, subcollection: string): Map<string, Rec
   return found
 }
 
-function batchSetOpsFor(worker: string, subcollection: string): MockBatchOp[] {
-  return mockBatchOps.filter((op) => op.type === "set" && op.path.startsWith(`users/${worker}/${subcollection}/`))
+function txSetOpsFor(worker: string, subcollection: string): MockBatchOp[] {
+  return mockTxWrites.filter((op) => op.type === "set" && op.path.startsWith(`users/${worker}/${subcollection}/`))
+}
+
+function txDeleteOpsFor(worker: string, subcollection: string): MockBatchOp[] {
+  return mockTxWrites.filter((op) => op.type === "delete" && op.path.startsWith(`users/${worker}/${subcollection}/`))
 }
 
 describe("registerStaff — templates and legacy resolution", () => {
-  it("calls the callable with the employee payload and provisions the full templates", async () => {
+  it("calls the callable with the employee payload and provisions the full templates in one transaction", async () => {
     activateAdmin()
+    seedUserDoc("e2")
     callableSuccess()
 
     const result = await actions.registerStaff(SEED_INPUT, mockFunctions as never, mockFirestore as never)
@@ -225,19 +255,21 @@ describe("registerStaff — templates and legacy resolution", () => {
     expect(result.resetLink).toBe("https://reset")
     // Every provisioned doc stamped with the signed-in admin's uid + server
     // timestamps (parity with the Flutter seeding).
-    const firstTaskSet = batchSetOpsFor("e2", "onboarding_tasks")[0]
+    const firstTaskSet = txSetOpsFor("e2", "onboarding_tasks")[0]
     expect(firstTaskSet.data?.adminId).toBe("adm-1")
     expect(firstTaskSet.data?.employeeId).toBe("e2")
     expect(firstTaskSet.data?.updatedAt).toBe("SERVER_TIMESTAMP")
     expect(firstTaskSet.data?.subtitle).toBe("Signature Required")
-    expect(batchSetOpsFor("e2", "onboarding_tasks")).toHaveLength(DEFAULT_ONBOARDING_TASKS.length)
-    expect(batchSetOpsFor("e2", "trainings")).toHaveLength(DEFAULT_TRAININGS.length)
-    expect(batchSetOpsFor("e2", "clearance")).toHaveLength(DEFAULT_CLEARANCES.length)
-    expect(mockBatchOps).toHaveLength(69)
+    expect(txSetOpsFor("e2", "onboarding_tasks")).toHaveLength(DEFAULT_ONBOARDING_TASKS.length)
+    expect(txSetOpsFor("e2", "trainings")).toHaveLength(DEFAULT_TRAININGS.length)
+    expect(txSetOpsFor("e2", "clearance")).toHaveLength(DEFAULT_CLEARANCES.length)
+    // Setup status flips to complete in the SAME transaction, on success only.
+    expect(mockDocStore.get("users/e2")?.setupStatus).toBe("complete")
   })
 
   it("uses the exact template doc IDs (parity with the employee app)", async () => {
     activateAdmin()
+    seedUserDoc("e2")
     callableSuccess()
     await actions.registerStaff(SEED_INPUT, mockFunctions as never, mockFirestore as never)
 
@@ -261,7 +293,7 @@ describe("registerStaff — templates and legacy resolution", () => {
     await expect(
       actions.registerStaff(SEED_INPUT, mockFunctions as never, mockFirestore as never),
     ).rejects.toBeInstanceOf(EmployeeActionError)
-    expect(mockBatchOps).toHaveLength(0)
+    expect(mockTxWrites).toHaveLength(0)
   })
 
   it("a missing/shapeless callable response fails loudly", async () => {
@@ -269,7 +301,7 @@ describe("registerStaff — templates and legacy resolution", () => {
     await expect(
       actions.registerStaff(SEED_INPUT, mockFunctions as never, mockFirestore as never),
     ).rejects.toMatchObject({ code: "internal" })
-    expect(mockBatchOps).toHaveLength(0)
+    expect(mockTxWrites).toHaveLength(0)
   })
 })
 
@@ -302,6 +334,7 @@ describe("registerStaff — provisioning never breaks a created account", () => 
 
   it("the combined callable+client flow settles at exactly 46/19/4 documents", async () => {
     activateAdmin()
+    seedUserDoc("e2")
     callableSuccess()
     seededCallableDefaults("e2") // callable adds 4 tasks + 1 training first
 
@@ -320,10 +353,13 @@ describe("registerStaff — provisioning never breaks a created account", () => 
     expect(trainings.has("hipaa")).toBe(true)
     expect(trainings.has("hipaa_compliance")).toBe(false)
     expect(storedDocsUnder("e2", "clearance").size).toBe(4)
+    expect(txDeleteOpsFor("e2", "onboarding_tasks")).toHaveLength(2)
+    expect(txDeleteOpsFor("e2", "trainings")).toHaveLength(1)
   })
 
   it("overlapping callable docs are upgraded in place: fields added, status/timestamps preserved", async () => {
     activateAdmin()
+    seedUserDoc("e2")
     callableSuccess()
     seededCallableDefaults("e2")
     await actions.registerStaff(SEED_INPUT, mockFunctions as never, mockFirestore as never)
@@ -340,10 +376,14 @@ describe("registerStaff — provisioning never breaks a created account", () => 
     expect(ack.updatedAt).toBe("CF_SERVER_TIMESTAMP")
   })
 
-  it("a batch commit failure reports setup:'incomplete' but preserves uid + reset link", async () => {
+  it("a transaction abort reports setup:'incomplete', marks the status, preserves uid + reset link", async () => {
     activateAdmin()
+    seedUserDoc("e2")
     callableSuccess()
-    mockCommitError = Object.assign(new Error("permission-denied at users/e2"), { code: "permission-denied" })
+    // Commit-level failure: the transaction cannot run at all.
+    mockTransactionError = Object.assign(new Error("permission-denied at users/e2"), {
+      code: "permission-denied",
+    })
 
     const result = await actions.registerStaff(SEED_INPUT, mockFunctions as never, mockFirestore as never)
 
@@ -353,21 +393,93 @@ describe("registerStaff — provisioning never breaks a created account", () => 
       setup: "incomplete",
     })
     expect(result.setupError).toContain("permission-denied")
+    // The incomplete status is persisted durably (recovery surface) — with
+    // the reset link deliberately NOT stored anywhere.
+    expect(mockDocStore.get("users/e2")).toMatchObject({ setupStatus: "incomplete" })
+    expect(mockUpdateDocCalls[0]?.ref.path).toBe("users/e2")
+    expect(mockUpdateDocCalls[0]?.data).toEqual({ setupStatus: "incomplete" })
   })
 
-  it("a batch construction failure is treated the same as a commit failure", async () => {
+  it("a write construction failure is treated the same as an abort", async () => {
     activateAdmin()
+    seedUserDoc("e2")
     callableSuccess()
-    mockBatchSetError = new Error("unsupported nested array")
+    mockTxSetError = new Error("unsupported nested array")
 
     const result = await actions.registerStaff(SEED_INPUT, mockFunctions as never, mockFirestore as never)
 
     expect(result).toMatchObject({ uid: "e2", setup: "incomplete", resetLink: "https://reset" })
     expect(result.setupError).toContain("unsupported nested array")
+    expect(mockDocStore.get("users/e2")?.setupStatus).toBe("incomplete")
+  })
+
+  it("REGRESSION: a legacy default signed after the initial read is retained, not erased", async () => {
+    activateAdmin()
+    seedUserDoc("e2")
+    callableSuccess()
+    seededCallableDefaults("e2")
+    // A pristine legacy doc becomes SIGNED by another client between the
+    // transaction's read pass and its commit.
+    mockTransactionContendHook = () => {
+      mockDocStore.set("users/e2/onboarding_tasks/employee_handbook", {
+        title: "Employee Handbook",
+        status: "acknowledged",
+        isCompleted: true,
+        signedAt: "just-now",
+        signatureUrl: "https://signed",
+      })
+    }
+
+    const result = await actions.registerStaff(SEED_INPUT, mockFunctions as never, mockFirestore as never)
+
+    expect(result.setup).toBe("complete")
+    expect(result.retainedLegacy).toEqual(["onboarding_tasks/employee_handbook"])
+    // The signature survived — the delete was discarded on contention and
+    // the re-validated plan kept the doc.
+    const handbook = mockDocStore.get("users/e2/onboarding_tasks/employee_handbook")!
+    expect(handbook.isCompleted).toBe(true)
+    expect(handbook.signatureUrl).toBe("https://signed")
+    expect(handbook.signedAt).toBe("just-now")
+    // Only the still-pristine `personal_details` got deleted: 4 seeded
+    // legacy docs + 44 created templates − 1 delete = 47.
+    expect(storedDocsUnder("e2", "onboarding_tasks").size).toBe(47)
+    expect(mockDocStore.get("users/e2")?.setupStatus).toBe("complete")
+  })
+
+  it("REGRESSION: a missing template completed by another client before commit keeps that work", async () => {
+    activateAdmin()
+    seedUserDoc("e2")
+    callableSuccess()
+    // Fresh employee: every template is missing. Another client completes
+    // the Resume task between the read pass and the commit.
+    mockTransactionContendHook = () => {
+      mockDocStore.set("users/e2/onboarding_tasks/resume", {
+        title: "Resume",
+        status: "acknowledged",
+        isCompleted: true,
+        fileUrl: "https://resume.pdf",
+        completedAt: "just-now",
+      })
+    }
+
+    const result = await actions.registerStaff(SEED_INPUT, mockFunctions as never, mockFirestore as never)
+
+    expect(result.setup).toBe("complete")
+    // The create was re-planned as an overlay after revalidation: employee
+    // work intact, descriptive/ownership fields still filled in.
+    const resume = mockDocStore.get("users/e2/onboarding_tasks/resume")!
+    expect(resume.isCompleted).toBe(true)
+    expect(resume.fileUrl).toBe("https://resume.pdf")
+    expect(resume.status).toBe("acknowledged")
+    expect(resume.adminId).toBe("adm-1")
+    expect(resume.subtitle).toBe("Upload Required")
+    expect(resume.actionType).toBe("upload")
+    expect(mockDocStore.get("users/e2")?.setupStatus).toBe("complete")
   })
 
   it("legacy docs holding real progress are retained, not destroyed", async () => {
     activateAdmin()
+    seedUserDoc("e2")
     callableSuccess()
     seededCallableDefaults("e2")
     // An admin already recorded work inside a legacy doc (Flutter flow).
@@ -501,7 +613,7 @@ describe("completeEmployeeSetup (setup retry)", () => {
     await expect(
       actions.completeEmployeeSetup({ uid: "e2", adminUid: "adm-1" }, mockFirestore as never),
     ).rejects.toMatchObject({ code: "permission-denied" })
-    expect(mockBatchOps).toHaveLength(0)
+    expect(mockTxWrites).toHaveLength(0)
   })
 
   it("rejects when the employee is missing or owned by another admin", async () => {
@@ -514,7 +626,7 @@ describe("completeEmployeeSetup (setup retry)", () => {
     await expect(
       actions.completeEmployeeSetup({ uid: "e9", adminUid: "adm-1" }, mockFirestore as never),
     ).rejects.toMatchObject({ code: "permission-denied" })
-    expect(mockBatchOps).toHaveLength(0)
+    expect(mockTxWrites).toHaveLength(0)
   })
 })
 

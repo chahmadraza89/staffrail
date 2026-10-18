@@ -191,23 +191,28 @@ The `registerStaff` callable creates the Auth account + `users/{uid}` doc +
 welcome notification AND writes a small **legacy subset** (4 minimal
 onboarding tasks incl. `personal_details` / `employee_handbook`, plus one
 `hipaa_compliance` training). The admin panel then provisions the FULL Dart
-template set and resolves that legacy subset in the same batch, so a
-web-registered employee ends with exactly **46 onboarding tasks + 19
-trainings + 4 clearances**. Rules (see `employee-actions.ts`):
+template set inside **one transaction** and resolves that legacy subset in
+the same transaction — so a web-registered employee ends with exactly
+**46 onboarding tasks + 19 trainings + 4 clearances** and no concurrent
+write can erase employee work mid-flight:
 
 - IDs: onboarding tasks use the `create()` slug, trainings use the
   **different** `_createTraining` slug (dash stays a dash: `skills-streaming`,
   not `skills_streaming`) — see `seed-templates.ts`.
-- Overlapping callable docs (acknowledgment form, offer letter) are upgraded
-  **in place**: descriptive/ownership fields merged, status/updatedAt
-  preserved.
-- Legacy extras are removed only when **pristine** (no progress); docs that
-  already hold employee work are retained and shown as a completion note.
-- If provisioning fails, the account still exists: the dialog shows
-  **"Account created — setup incomplete"** with the reason, keeps the
-  uid + password link, and **Complete setup** retries for the SAME uid
-  (`completeEmployeeSetup` — fill-missing + overlay-only, idempotent).
-  Both batch construction and commit failures land in this path.
+- ALL documents are read before any write; a template is created only if it
+  is still missing at the write boundary, existing docs get an
+  overlay/descriptive merge (status/updatedAt/progress preserved), and a
+  legacy default is deleted only if it is **still pristine** when the
+  transaction commits — a signature landing mid-flight is retained and
+  reported; transaction retries re-read (revalidate) everything.
+- If provisioning fails, `setupStatus: "incomplete"` is persisted on the
+  user doc (best-effort; never the reset link!) so recovery survives
+  closing the dialog, a refresh, or signing in again: the employee's
+  Directory card shows a **Setup incomplete** badge with a **Complete
+  setup** action that retries the SAME uid (`completeEmployeeSetup` —
+  active-admin + ownership checks, idempotent fill-missing/overlay-only
+  provisioning). Failures surface as an actionable banner; the status only
+  flips to `complete` inside the successful provisioning transaction.
 - `updateEmployee` validates the employee is still active **inside the
   write transaction** (a deactivation racing the edit cannot bypass it).
 

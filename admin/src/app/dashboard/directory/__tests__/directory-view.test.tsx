@@ -47,6 +47,7 @@ const employee = (overrides: Partial<AdminEmployeeProgress>): AdminEmployeeProgr
   clearanceProgress: 0,
   lastLogin: new Date(Date.now() - 2 * HOUR),
   isActive: true,
+  setupStatus: "complete",
   ...overrides,
 })
 
@@ -344,7 +345,92 @@ describe("DirectoryView — errors are never mislabeled as empty results", () =>
   })
 })
 
-describe("DirectoryView — setup recovery (incomplete provisioning)", () => {
+describe("DirectoryView — durable setup recovery (persisted status)", () => {
+  it("shows the card indicator + Complete setup for persisted incomplete status and recovers", async () => {
+    renderDirectory()
+    // Remount with the DURABLE status (e.g. fresh page load / re-sign-in):
+    // recovery must NOT depend on in-memory dialog state.
+    fire(() => employeesCtrl.emit("users", [employee({ setupStatus: "incomplete" })]))
+
+    expect(screen.getByTestId("setup-incomplete-e1")).toBeInTheDocument()
+    fireEvent.click(screen.getByRole("button", { name: /complete setup/i }))
+
+    await waitFor(() => {
+      // Same-uid retry — never a second registration/account.
+      expect(completeSetupMock).toHaveBeenCalledWith({ uid: "e1", adminUid: "adm-1" })
+    })
+    expect(registerStaffMock).not.toHaveBeenCalled()
+
+    // The provisioning transaction flips setupStatus → the live stream
+    // re-renders the card without the indicator.
+    fire(() => employeesCtrl.emit("users", [employee({})]))
+    expect(screen.queryByTestId("setup-incomplete-e1")).not.toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: /complete setup/i })).not.toBeInTheDocument()
+  })
+
+  it("a failed card retry shows the reason clearly and stays recoverable", async () => {
+    completeSetupMock.mockRejectedValue(
+      new EmployeeActionError("permission-denied on users/e1", "permission-denied"),
+    )
+    renderDirectory()
+    fire(() => employeesCtrl.emit("users", [employee({ setupStatus: "incomplete" })]))
+
+    fireEvent.click(screen.getByRole("button", { name: /complete setup/i }))
+
+    const banner = await screen.findByTestId("setup-retry-error")
+    expect(banner).toHaveTextContent(/Completing setup for Ahmad Raza failed/)
+    expect(banner).toHaveTextContent(/permission-denied on users\/e1/)
+    // The indicator remains (not fake-complete) and retry stays available.
+    expect(screen.getByTestId("setup-incomplete-e1")).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: /try again/i })).toBeInTheDocument()
+    expect(registerStaffMock).not.toHaveBeenCalled()
+  })
+
+  it("closing the registration dialog keeps recovery available via the card", async () => {
+    registerStaffMock.mockResolvedValue({
+      uid: "e9",
+      resetLink: "https://reset.example",
+      setup: "incomplete",
+      setupError: "quota exceeded",
+    })
+    renderDirectory()
+    fire(() => employeesCtrl.emit("users", []))
+
+    fireEvent.click(screen.getByRole("button", { name: /add new staff/i }))
+    fireEvent.change(screen.getByPlaceholderText("Full Name"), {
+      target: { value: "Recoverable Person" },
+    })
+    fireEvent.change(screen.getByPlaceholderText("e.g. john@example.com"), {
+      target: { value: "recover@bhmh.dev" },
+    })
+    fireEvent.submit(screen.getByTestId("add-employee-dialog").querySelector('form[data-testid="add-employee-form"]')!)
+    await screen.findByTestId("setup-incomplete-warning")
+
+    // Close the dialog — in-memory incomplete state is discarded…
+    const dialog = screen.getByTestId("add-employee-dialog")
+    fireEvent.click(screen.getAllByRole("button", { name: /^close$/i }).at(-1)!)
+    await waitFor(() => {
+      expect(dialog).not.toBeInTheDocument()
+    })
+
+    // …but the persisted status surfaces on the card (via the live stream).
+    fire(() =>
+      employeesCtrl.emit("users", [
+        employee({ uid: "e9", name: "Recoverable Person", setupStatus: "incomplete" }),
+      ]),
+    )
+    expect(screen.getByTestId("setup-incomplete-e9")).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole("button", { name: /complete setup/i }))
+    completeSetupMock.mockResolvedValue({ created: 65, overlaid: 4, removed: 2, retainedLegacy: [] })
+    fireEvent.click(screen.getAllByRole("button", { name: /complete setup/i })[0])
+    await waitFor(() => {
+      expect(completeSetupMock).toHaveBeenCalledWith({ uid: "e9", adminUid: "adm-1" })
+    })
+  })
+})
+
+describe("DirectoryView — in-dialog setup recovery (incomplete provisioning)", () => {
   function fillAddForm() {
     fireEvent.click(screen.getByRole("button", { name: /add new staff/i }))
     fireEvent.change(screen.getByPlaceholderText("Full Name"), {

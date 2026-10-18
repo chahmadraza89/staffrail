@@ -302,6 +302,7 @@ export function subscribeAdminEmployeesProgress(
     email: string | null
     lastLogin: Date
     isActive: boolean
+    setupStatus: "complete" | "incomplete"
     doc: DocumentSnapshot<DocumentData>
   }
 
@@ -372,6 +373,7 @@ export function subscribeAdminEmployeesProgress(
         clearanceProgress: clearancePct,
         lastLogin: employee.lastLogin,
         isActive: employee.isActive,
+        setupStatus: employee.setupStatus,
       }
     })
 
@@ -457,6 +459,9 @@ export function subscribeAdminEmployeesProgress(
           email: str(data.email),
           lastLogin: toDate(data.lastLogin) ?? toDate(data.createdAt) ?? new Date(),
           isActive: data.isActive !== false,
+          // Web-provisioning recovery state (durable across refresh/sign-in);
+          // anything but an explicit "incomplete" is complete.
+          setupStatus: data.setupStatus === "incomplete" ? "incomplete" : "complete",
           doc,
         })
       }

@@ -239,6 +239,41 @@ Empty-directory / empty-filter / search-miss texts render only after a
 cards retained from the last successful update are labelled stale and no
 empty-state message is shown.
 
+### Employee detail page (`/dashboard/directory/[employeeId]`)
+
+Port of the Flutter `AdminDirectoryInnerProfileCard` screen. Data model:
+
+- The **profile header + progress bars** reuse `subscribeAdminEmployeesProgress`
+  (single-sourced with the Directory cards' progress formulas).
+- The **three document modules** (`onboarding_tasks` / `trainings` /
+  `clearance`) stream via `subscribeEmployeeDetail` in
+  `src/lib/admin/employee-detail-streams.ts`.
+- `src/lib/admin/compliance-helpers.ts` is a faithful port of
+  `ComplianceHelpers` + the Dart merge Builder. Preserved Dart quirks (do
+  not "fix" without changing the Flutter app too):
+  1. Template title/actionType override the live document's own values
+     (guards against the buggy "Onboarding Task" duplicate titles).
+  2. Onboarding docs not among the 46 templates are appended as dynamic
+     tasks, but extra trainings/clearances are dropped (Dart only maps the
+     19/4 default lists).
+  3. A task id matching NO category id list falls out of the category view
+     (e.g. `tax_documents_w_4`); two Category-2 ids
+     (`corporate_confidentiality_statement`,
+     `transportation_acknowledgement_statement`) have no default task, so a
+     fresh employee shows 3/21/6/3/3/19/4 = 59 rows, matching Flutter.
+- **Failed module ≠ fabricated data**: when one module's stream errors, its
+  template entries are NOT rendered as if they were real pending work
+  (`buildComplianceModel` receives `null` for a failed module); other
+  modules keep their Dart default template rows, labelled stale. This is a
+  deliberate hardening over Flutter, which would render all 69 defaults
+  even while its loaders fail.
+- The Dart "No compliance requirements found." copy is kept but effectively
+  unreachable (template-backed categories are never all-empty on a ready
+  read), exactly like the Flutter source.
+- Header lifecycle actions (Edit / Deactivate / durable Complete-setup
+  recovery) behave identically to the Directory cards. The task detail /
+  review panel (accept / reject / skip / blank-form) is the next step.
+
 
 
 ## Deploy

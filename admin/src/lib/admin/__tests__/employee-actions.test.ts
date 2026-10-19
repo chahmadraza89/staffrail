@@ -37,7 +37,9 @@ const mockFunctions = { kind: "functions" }
 
 let mockCallableImpl: ((payload: unknown) => Promise<{ data: unknown }>) | null = null
 let mockTxSetError: Error | null = null
-/** Aborts the whole transaction before the body runs (commit-level failure). */
+/** Aborts ONE transaction before its body runs (commit-level failure),
+ * then clears — so an action's follow-up transaction (e.g. the setup
+ * fallback) runs against a network that has recovered. */
 let mockTransactionError: Error | null = null
 /** Simulates ANOTHER client writing between the first transaction read
  * pass and the commit — exactly once, on the first attempt. */
@@ -88,7 +90,9 @@ vi.mock("firebase/firestore", () => {
       transactionFn: (transaction: unknown) => unknown,
     ): Promise<unknown> => {
       if (mockTransactionError) {
-        return Promise.reject(mockTransactionError)
+        const abortError = mockTransactionError
+        mockTransactionError = null // one-shot: the NEXT transaction runs
+        return Promise.reject(abortError)
       }
       for (let attempt = 0; attempt < 5; attempt += 1) {
         const reads = new Map<string, Stored>()
@@ -423,7 +427,7 @@ describe("registerStaff — provisioning never breaks a created account", () => 
     expect(mockUpdateDocCalls).toHaveLength(0)
   })
 
-  it("REGRESSION: the gap-fallback fills ONLY a MISSING marker, never overwrites", async () => {
+  it("REGRESSION: the gap-fallback fills a MISSING marker in one transaction", async () => {
     activateAdmin()
     callableSuccess() // pre-deploy backend: no server-side marker was written
     mockDocStore.set("users/e2", {
@@ -433,55 +437,134 @@ describe("registerStaff — provisioning never breaks a created account", () => 
       adminId: "adm-1",
       isActive: true,
     })
+    // Provisioning aborts; the fallback then runs as its own transaction.
     mockTransactionError = new Error("abort")
 
-    let result = await actions.registerStaff(SEED_INPUT, mockFunctions as never, mockFirestore as never)
-    expect(result.setup).toBe("incomplete")
-    // Missing field → filled best-effort so recovery is reachable.
-    expect(mockUpdateDocCalls[0]?.data).toEqual({ setupStatus: "incomplete" })
-    expect(mockDocStore.get("users/e2")?.setupStatus).toBe("incomplete")
+    const result = await actions.registerStaff(SEED_INPUT, mockFunctions as never, mockFirestore as never)
 
-    // …but a marker from ANOTHER attempt's successful completion is never
-    // overwritten by this attempt's failure handler.
-    mockUpdateDocCalls.length = 0
-    mockDocStore.set("users/e2", {
-      name: "Ahmad Raza",
-      role: "employee",
-      adminId: "adm-1",
-      isActive: true,
-      setupStatus: "complete",
-    })
-    result = await actions.registerStaff(SEED_INPUT, mockFunctions as never, mockFirestore as never)
     expect(result.setup).toBe("incomplete")
-    expect(mockUpdateDocCalls).toHaveLength(0) // field present → no write
-    expect(mockDocStore.get("users/e2")?.setupStatus).toBe("complete")
+    // Read + missing-field check + conditional write happen INSIDE one
+    // transaction: a single merge-set on the user doc.
+    expect(mockTxWrites.filter((op) => op.path === "users/e2")).toEqual([
+      { type: "set", path: "users/e2", data: { setupStatus: "incomplete" }, merge: true },
+    ])
+    expect(mockDocStore.get("users/e2")?.setupStatus).toBe("incomplete")
+    expect(mockDocStore.get("users/e2")).not.toHaveProperty("resetLink")
   })
 
-  it("REGRESSION: provisioning AND the fallback client write both fail — status left intact", async () => {
+  it("REGRESSION: an existing complete/incomplete status is never touched", async () => {
     activateAdmin()
-    callableSuccess() // pre-deploy backend: no server-side marker exists yet
+    callableSuccess()
+
+    // A concurrent attempt already completed: the fallback must not clobber.
     mockDocStore.set("users/e2", {
       name: "Ahmad Raza",
       email: "ahmad@bhmh.dev",
       role: "employee",
       adminId: "adm-1",
       isActive: true,
-      // A previous interrupted attempt's best-effort marker: still incomplete
-      setupStatus: "incomplete",
+      setupStatus: "complete",
     })
     mockTransactionError = new Error("abort")
-    // Any follow-up client write attempt is ALSO rejected by the network —
-    // but no failure handler may overwrite or repair the status wrongly.
-    mockUpdateDocImpl = (reference, data) => {
-      mockUpdateDocCalls.push({ ref: reference, data })
-      return Promise.reject(Object.assign(new Error("offline"), { code: "unavailable" }))
+    let result = await actions.registerStaff(SEED_INPUT, mockFunctions as never, mockFirestore as never)
+
+    expect(result.setup).toBe("incomplete")
+    expect(mockTxWrites.filter((op) => op.path === "users/e2")).toHaveLength(0) // field present → no write
+    expect(mockDocStore.get("users/e2")?.setupStatus).toBe("complete")
+
+    // Same for the callable's own "incomplete" marker: nothing to fill.
+    mockTxWrites.length = 0
+    mockDocStore.set("users/e2", {
+      name: "Ahmad Raza",
+      email: "ahmad@bhmh.dev",
+      role: "employee",
+      adminId: "adm-1",
+      isActive: true,
+      setupStatus: "incomplete",
+    })
+    mockTransactionError = new Error("abort 2")
+    result = await actions.registerStaff(SEED_INPUT, mockFunctions as never, mockFirestore as never)
+
+    expect(result.setup).toBe("incomplete")
+    expect(mockTxWrites.filter((op) => op.path === "users/e2")).toHaveLength(0)
+    expect(mockDocStore.get("users/e2")?.setupStatus).toBe("incomplete")
+  })
+
+  it("REGRESSION: a complete landing mid-flight wins the revalidation race", async () => {
+    activateAdmin()
+    callableSuccess()
+    // Marker missing when the fallback reads; ANOTHER attempt's successful
+    // provisioning lands between that read and the commit: the transaction
+    // is discarded and the body re-runs with fresh reads → write dropped.
+    mockDocStore.set("users/e2", {
+      name: "Ahmad Raza",
+      email: "ahmad@bhmh.dev",
+      role: "employee",
+      adminId: "adm-1",
+      isActive: true,
+    })
+    mockTransactionError = new Error("abort")
+    mockTransactionContendHook = () => {
+      mockDocStore.set("users/e2", { ...mockDocStore.get("users/e2")!, setupStatus: "complete" })
     }
 
     const result = await actions.registerStaff(SEED_INPUT, mockFunctions as never, mockFirestore as never)
+
+    expect(result.setup).toBe("incomplete") // THIS attempt still failed
+    // Revalidated before commit: "complete" preserved — the discarded
+    // attempt's "incomplete" plan was never applied.
+    expect(mockDocStore.get("users/e2")?.setupStatus).toBe("complete")
+  })
+
+  it("REGRESSION: a deleted employee stays deleted — the fallback never recreates", async () => {
+    activateAdmin()
+    callableSuccess()
+    mockDocStore.set("users/e2", {
+      name: "Ahmad Raza",
+      email: "ahmad@bhmh.dev",
+      role: "employee",
+      adminId: "adm-1",
+      isActive: true,
+    })
+    mockTransactionError = new Error("abort")
+    // The profile is deleted between the fallback's read and its commit:
+    // the contention re-read sees a missing document and writes nothing.
+    mockTransactionContendHook = () => {
+      mockDocStore.delete("users/e2")
+    }
+
+    const result = await actions.registerStaff(SEED_INPUT, mockFunctions as never, mockFirestore as never)
+
     expect(result.setup).toBe("incomplete")
-    // The server-written (here: pre-deploy fallback) "incomplete" survives
-    // untouched — recovery stays reachable once connectivity returns.
-    expect(mockDocStore.get("users/e2")?.setupStatus).toBe("incomplete")
+    // The discarded plan was a merge-only fill of an EXISTING doc; after
+    // revalidation no document was recreated.
+    expect(mockDocStore.has("users/e2")).toBe(false)
+  })
+
+  it("REGRESSION: a failed fallback does not mask the original setup error", async () => {
+    activateAdmin()
+    callableSuccess() // pre-deploy backend: marker missing entirely
+    mockDocStore.set("users/e2", {
+      name: "Ahmad Raza",
+      email: "ahmad@bhmh.dev",
+      role: "employee",
+      adminId: "adm-1",
+      isActive: true,
+    })
+    mockTransactionError = new Error("offline during provisioning")
+    // The fallback's own transaction dies mid-flight (after planning the
+    // fill); it must be swallowed with the ORIGINAL error preserved.
+    mockTransactionContendHook = () => {
+      throw Object.assign(new Error("fallback tx aborted"), { code: "unavailable" })
+    }
+
+    const result = await actions.registerStaff(SEED_INPUT, mockFunctions as never, mockFirestore as never)
+
+    expect(result.setup).toBe("incomplete")
+    expect(result.setupError).toBe("offline during provisioning")
+    // The discarded write never landed; recovery stays server-driven, and
+    // the reset link is still not persisted anywhere.
+    expect(mockDocStore.get("users/e2")).not.toHaveProperty("setupStatus")
     expect(mockDocStore.get("users/e2")).not.toHaveProperty("resetLink")
   })
 

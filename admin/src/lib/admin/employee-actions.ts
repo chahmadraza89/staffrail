@@ -303,20 +303,33 @@ export async function provisionEmployeeDocuments(
  *
  * `ensureSetupStatusIncomplete` is a FALLBACK for accounts registered while
  * the PREVIOUS callable deployment is still live (no server-side marker):
- * it fills the field ONLY when it is missing entirely on an existing doc —
- * it can never overwrite a callable-written `"incomplete"`, nor a
- * concurrent `"complete"` from a successful retry, so a failed/interrupted
- * attempt always leaves the original status intact. Once the updated
- * callable is deployed (`firebase deploy --only functions`), this is a
- * no-op fast path.
+ * the read, the missing-field check and the conditional write run INSIDE
+ * ONE transaction — a concurrent completion that lands before commit
+ * discards the plan and re-runs the body with fresh reads, so an existing
+ * `"complete"` (or the callable's own `"incomplete"`) can never be
+ * overwritten. A document deleted at the re-validated read is NOT
+ * recreated. Any failure is swallowed (best-effort) without masking the
+ * original provisioning error. Once the updated callable is deployed
+ * (`firebase deploy --only functions`), this is a no-op fast path.
  */
 async function ensureSetupStatusIncomplete(db: Firestore, uid: string): Promise<void> {
   try {
-    const snapshot = await getDoc(doc(db, FIREBASE_COLLECTIONS.users, uid))
-    if (snapshot.exists() && snapshot.data()?.setupStatus === undefined) {
-      await updateDoc(snapshot.ref, { setupStatus: "incomplete" })
-    }
+    await runTransaction(db, async (transaction) => {
+      const reference = doc(db, FIREBASE_COLLECTIONS.users, uid)
+      const snapshot = await transaction.get(reference)
+      if (!snapshot.exists()) {
+        // Deleted employee — the fallback never (re)creates documents.
+        return
+      }
+      if (snapshot.data()?.setupStatus !== undefined) {
+        // Preserve BOTH an existing "incomplete" and another attempt's
+        // successful "complete".
+        return
+      }
+      transaction.set(reference, { setupStatus: "incomplete" }, { merge: true })
+    })
   } catch (error) {
+    // Best-effort only: never hide the original provisioning failure.
     console.warn("[employee-actions] could not fill a missing setup-status marker:", error)
   }
 }
@@ -461,7 +474,12 @@ export async function completeEmployeeSetup(
     // No client marker writes here: the server-written (or gap-filled)
     // status stays exactly as it is; fill only a MISSING marker after a
     // failed retry, never overwriting a concurrent successful completion.
-    if (!(error instanceof EmployeeActionError && error.code === "not-found")) {
+    // Authorization failures (not-found, permission-denied) must not touch
+    // the document at all — including a foreign admin's employee.
+    const skipFallback =
+      error instanceof EmployeeActionError &&
+      (error.code === "not-found" || error.code === "permission-denied")
+    if (!skipFallback) {
       await ensureSetupStatusIncomplete(firestore, input.uid)
     }
     throw error

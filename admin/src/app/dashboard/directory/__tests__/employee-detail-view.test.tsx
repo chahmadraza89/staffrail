@@ -1,20 +1,27 @@
 // @vitest-environment jsdom
 /**
- * EmployeeDetail view tests. Streams are mocked at module level (keeping a
- * REAL LiveStreamEngine controller per stream) and the employee actions are
- * mocked — state transitions (connecting → ready/error, retained stale
- * content, dialog staleness) must come from actual render cycles.
+ * EmployeeDetailView tests. The subscription builders are mocked at module
+ * level while the REAL LiveStreamEngine drives state transitions, so
+ * connecting → ready/error behavior, pending/failed/stale module states,
+ * retained data and reactive dialogs all come from actual render cycles.
+ *
+ * The fake `subscribeEmployeeDetail` mirrors the REAL builder contract:
+ * it listens "profile" synchronously, attaches the three document modules
+ * only when the profile gate reports an active owned employee, and every
+ * emit publishes the FULL merged snapshot.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 import * as streams from "@/lib/admin/dashboard-streams"
 import * as detailStreams from "@/lib/admin/employee-detail-streams"
-import type { AdminEmployeeProgress } from "@/lib/admin/dashboard-models"
+import type { EmployeeProfileDetail } from "@/lib/admin/employee-detail-streams"
 import * as actions from "@/lib/admin/employee-actions"
 
 import { EmployeeDetailView } from "@/app/dashboard/directory/[employeeId]/employee-detail-view"
 
+// The workspace-wide progress stream must NEVER be subscribed by the detail
+// page (single-employee isolation) — kept as a spy to assert that.
 vi.mock("@/lib/admin/dashboard-streams", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/admin/dashboard-streams")>()
   return {
@@ -49,45 +56,55 @@ const updateEmployeeMock = vi.mocked(actions.updateEmployee)
 const deactivateEmployeeMock = vi.mocked(actions.deactivateEmployee)
 const completeSetupMock = vi.mocked(actions.completeEmployeeSetup)
 
-const HOUR = 60 * 60 * 1000
-
-const employee = (overrides: Partial<AdminEmployeeProgress>): AdminEmployeeProgress => ({
+const employee = (overrides: Partial<EmployeeProfileDetail> = {}): EmployeeProfileDetail => ({
   uid: "e1",
   name: "Ahmad Raza",
   email: "ahmad@bhmh.dev",
-  overallProgress: 0.5,
-  onboardingProgress: 0.4,
-  trainingProgress: 0.6,
-  clearanceProgress: 0.25,
-  lastLogin: new Date(Date.now() - 2 * HOUR),
+  lastLogin: new Date(2026, 0, 1, 12, 0, 0),
   isActive: true,
   setupStatus: "complete",
+  adminId: "adm-1",
   ...overrides,
 })
 
-type DetailCtrl = Parameters<typeof detailStreams.subscribeEmployeeDetail>[1]
+type DetailCtrl = Parameters<typeof detailStreams.subscribeEmployeeDetail>[2]
+type ProfileStage = detailStreams.EmployeeDetailStage
 
-let employeesCtrl: Parameters<typeof streams.subscribeAdminEmployeesProgress>[1]
-let detailCtrl: DetailCtrl
+let detailCtrl: DetailCtrl | undefined
+
+/** The real builder emits the FULL merged snapshot per listener id; the
+ * fake mirrors that contract, including the gate-attach choreography. */
+const latestDetail: detailStreams.EmployeeDetailSnapshot = {
+  profile: null,
+  tasks: [],
+  trainings: [],
+  clearances: [],
+}
+let modulesAttached = false
 
 beforeEach(() => {
   vi.clearAllMocks()
-  progressSub.mockImplementation((_adminId, ctrl) => {
-    ctrl.listen("users")
-    employeesCtrl = ctrl
-    return vi.fn()
-  })
-  detailSub.mockImplementation((_employeeId, ctrl: DetailCtrl) => {
-    ctrl.listen("onboardingTasks")
-    ctrl.listen("trainings")
-    ctrl.listen("clearance")
+  modulesAttached = false
+  detailCtrl = undefined
+  latestDetail.profile = null
+  latestDetail.tasks = []
+  latestDetail.trainings = []
+  latestDetail.clearances = []
+
+  progressSub.mockImplementation((() => {
+    throw new Error("detail page must not subscribe the workspace-wide employees stream")
+  }) as unknown as typeof streams.subscribeAdminEmployeesProgress)
+
+  detailSub.mockImplementation((_employeeId, _adminUid, ctrl: DetailCtrl) => {
+    ctrl.listen("profile") // the anchor listener attaches synchronously
     detailCtrl = ctrl
     return vi.fn()
   })
+
   updateEmployeeMock.mockResolvedValue()
   deactivateEmployeeMock.mockResolvedValue()
   completeSetupMock.mockResolvedValue({
-    created: 61,
+    created: 69,
     overlaid: 0,
     removed: 0,
     retainedLegacy: [],
@@ -102,18 +119,36 @@ function fire(emit: () => void): void {
   act(emit)
 }
 
-function renderDetail() {
-  render(<EmployeeDetailView employeeId="e1" adminUid="adm-1" adminEmail="admin@bhmh.dev" />)
+function renderDetail(props: { employeeId?: string; adminUid?: string } = {}) {
+  render(
+    <EmployeeDetailView
+      employeeId={props.employeeId ?? "e1"}
+      adminUid={props.adminUid ?? "adm-1"}
+      adminEmail="admin@bhmh.dev"
+    />,
+  )
 }
 
-/** The real builder emits the FULL merged snapshot per listener id; the
- * fake mirrors that contract from the test side. */
-const latestDetail: detailStreams.EmployeeDetailSnapshot = { tasks: [], trainings: [], clearances: [] }
+/** Emits a profile stage through the gate: modules attach in the SAME
+ * synchronous block when (and only when) the gate passes. */
+function emitProfileStage(stage: ProfileStage): void {
+  latestDetail.profile = stage
+  if (stage.state === "active" && !modulesAttached) {
+    modulesAttached = true
+    detailCtrl!.listen("onboardingTasks")
+    detailCtrl!.listen("trainings")
+    detailCtrl!.listen("clearance")
+  }
+  fire(() => detailCtrl!.emit("profile", { ...latestDetail }))
+}
 
 function emitModule(
   id: "onboardingTasks" | "trainings" | "clearance",
   docs: Array<{ id: string; data: Record<string, unknown> }>,
 ): void {
+  if (!modulesAttached) {
+    throw new Error(`module ${id} emitted while the gate was closed`)
+  }
   if (id === "onboardingTasks") {
     latestDetail.tasks = docs.map((doc) => detailStreams.mapTaskDoc(doc.id, doc.data))
   } else if (id === "trainings") {
@@ -121,7 +156,7 @@ function emitModule(
   } else {
     latestDetail.clearances = docs.map((doc) => detailStreams.mapClearanceDoc(doc.id, doc.data))
   }
-  fire(() => detailCtrl.emit(id, { ...latestDetail }))
+  fire(() => detailCtrl!.emit(id, { ...latestDetail }))
 }
 
 function emitReadyDetail(
@@ -129,33 +164,50 @@ function emitReadyDetail(
   trainings: Array<{ id: string; data: Record<string, unknown> }> = [],
   clearances: Array<{ id: string; data: Record<string, unknown> }> = [],
 ): void {
-  latestDetail.tasks = []
-  latestDetail.trainings = []
-  latestDetail.clearances = []
   emitModule("onboardingTasks", tasks)
   emitModule("trainings", trainings)
   emitModule("clearance", clearances)
 }
 
-describe("EmployeeDetailView — anatomy", () => {
-  it("subscribes to the admin progress stream AND the employee detail modules", () => {
+function activeStage(overrides: Partial<EmployeeProfileDetail> = {}): ProfileStage {
+  return { state: "active", employee: employee(overrides) }
+}
+
+/* ── anatomy / isolation ─────────────────────────────────────────────────── */
+
+describe("EmployeeDetailView — single-employee subscription", () => {
+  it("subscribes ONLY to the selected employee (+ admin uid) and never to the workspace", () => {
     renderDetail()
-    expect(progressSub).toHaveBeenCalledWith("adm-1", expect.anything())
-    expect(detailSub).toHaveBeenCalledWith("e1", expect.anything())
-    // Connecting: profile skeleton + compliance skeleton visible.
+
+    expect(detailSub).toHaveBeenCalledTimes(1)
+    expect(detailSub).toHaveBeenCalledWith("e1", "adm-1", expect.anything())
+    expect(progressSub).not.toHaveBeenCalled()
+
+    // Connecting: page skeleton visible, no error, no data claims.
     expect(screen.getAllByTestId("detail-skeleton").length).toBeGreaterThan(0)
+    expect(screen.queryByTestId("no-requirements")).not.toBeInTheDocument()
   })
 
-  it("renders the Dart 7 categories as section blocks once ready", () => {
+  it("changing employee re-subscribes to the new employee only", () => {
+    const { unmount } = render(<EmployeeDetailView employeeId="e5" adminUid="adm-1" adminEmail="a@bhmh.dev" />)
+    expect(detailSub).toHaveBeenCalledWith("e5", "adm-1", expect.anything())
+    unmount()
     renderDetail()
-    fire(() => employeesCtrl.emit("users", [employee({})]))
-    emitReadyDetail([
-      { id: "signed_offer_letter", data: { title: "X", status: "verified" } },
-      { id: "resume", data: { title: "Resume", status: "inProgress" } },
-    ])
+    expect(detailSub).toHaveBeenCalledWith("e1", "adm-1", expect.anything())
+    // Each engine start listens exactly its own profile — no shared state.
+    expect(detailSub).toHaveBeenCalledTimes(2)
+  })
+})
+
+/* ── checklist / progress from shared formulas ───────────────────────────── */
+
+describe("EmployeeDetailView — full 69-requirement compliance view", () => {
+  it("renders all 8 sections and the 69 Dart requirements once everything is ready", () => {
+    renderDetail()
+    emitProfileStage(activeStage())
+    emitReadyDetail()
 
     expect(screen.getByTestId("profile-header")).toBeInTheDocument()
-    expect(screen.getByText("Employee Profile Detail")).toBeInTheDocument()
     expect(screen.getByText("Compliance Categories")).toBeInTheDocument()
     for (const catId of [
       "employment_acceptance",
@@ -168,47 +220,284 @@ describe("EmployeeDetailView — anatomy", () => {
     ]) {
       expect(screen.getByTestId(`category-${catId}`)).toBeInTheDocument()
     }
-    // Dart quirk visible: per-category "x of y completed" subtitles.
-    expect(screen.getByText("1 of 3 completed")).toBeInTheDocument()
+    // The fallback group is empty for a fresh employee → not rendered.
+    expect(screen.queryByTestId("category-additional_requirements")).not.toBeInTheDocument()
+    // No partial/stale labels when everything is ready.
+    expect(screen.queryByTestId("progress-partial-note")).not.toBeInTheDocument()
+    expect(screen.queryByTestId("progress-overview-partial")).not.toBeInTheDocument()
+
+    // 46 onboarding + 19 training + 4 clearance = 69 visible requirement rows.
+    expect(screen.getAllByTestId("task-tile")).toHaveLength(69)
     const banner = screen.getByTestId("task-progress-banner")
     expect(banner).toHaveTextContent("Completed")
     expect(banner).toHaveTextContent("Remaining")
-    // 59 rendered tasks, 1 verified → 58 remaining (Dart formula).
-    expect(banner).toHaveTextContent("58")
+    expect(banner).toHaveTextContent("69")
+    expect(screen.queryByTestId("no-requirements")).not.toBeInTheDocument()
   })
 
-  it("a buggy doc title is guarded by the template merge", () => {
+  it("custom and retained-legacy records are visible alongside the templates", () => {
     renderDetail()
-    fire(() => employeesCtrl.emit("users", [employee({})]))
+    emitProfileStage(activeStage())
+    emitReadyDetail(
+      [{ id: "custom_extra_form", data: { title: "Extra Form", status: "acknowledged" } }],
+      [trainingDocRow("start", "completed"), trainingDocRow("custom_module", "pending")],
+      [clearanceDocRow("custom_check", "verified")],
+    )
+
+    const fallback = screen.getByTestId("category-additional_requirements")
+    expect(fallback).toHaveTextContent("Extra Form")
+    const trainingRows = screen
+      .getByTestId("category-training_compliance")
+      .querySelectorAll("[data-testid=task-tile]")
+    expect(trainingRows.length).toBe(DEFAULT_TRAININGS_COUNT + 1)
+    const clearanceRows = screen.getByTestId("category-clearance").querySelectorAll("[data-testid=task-tile]")
+    expect(clearanceRows.length).toBe(4 + 1)
+  })
+
+  it("a buggy doc title is guarded by the template merge; tiles show Dart status text", () => {
+    renderDetail()
+    emitProfileStage(activeStage())
     emitReadyDetail([
-      { id: "drive_r_s_verification", data: {} },
+      { id: "signed_offer_letter", data: { title: "Signed offer letter", status: "verified" } },
+      { id: "resume", data: { title: "Resume", status: "submitted" } },
     ])
 
     const firstTile = screen.getAllByTestId("task-tile")[0]
     expect(firstTile).toHaveTextContent("Onboarding Acknowledgment form")
     expect(firstTile).toHaveTextContent("Awaiting Submission")
-  })
-
-  it("task tiles show Dart status text and done checks", () => {
-    renderDetail()
-    fire(() => employeesCtrl.emit("users", [employee({})]))
-    emitReadyDetail([
-      { id: "signed_offer_letter", data: { title: "Signed offer letter", status: "verified" } },
-      { id: "resume", data: { title: "Resume", status: "submitted" } },
-    ])
 
     const tiles = screen.getAllByTestId("task-tile")
     const offerTile = tiles.find((tile) => tile.textContent?.includes("Signed offer letter"))!
     const resumeTile = tiles.find((tile) => tile.textContent?.includes("Resume"))!
     expect(offerTile).toHaveTextContent("Verified")
     expect(resumeTile).toHaveTextContent("Pending Review")
+    // Per-category "x of y completed" (Dart quirk visible).
+    expect(screen.getByText("1 of 3 completed")).toBeInTheDocument()
+  })
+
+  it("progress bars reuse the module snapshots through the shared formulas", () => {
+    renderDetail()
+    emitProfileStage(activeStage())
+    // Dashboard formula: completed isCompleted-flag over tasks whose status
+    // is not noActionRequired → 1 of 2 counted onboarding tasks.
+    emitReadyDetail(
+      [
+        { id: "signed_offer_letter", data: { title: "x", status: "verified", isCompleted: true } },
+        { id: "resume", data: { title: "y", status: "submitted", isCompleted: false } },
+        { id: "attestation_form", data: { title: "z", status: "noActionRequired", isCompleted: true } },
+      ],
+      [
+        trainingDocRow("start", "completed"),
+        trainingDocRow("m_e_t", "underReview"),
+      ],
+      [],
+    )
+    expect(screen.getByTestId("detail-progress-onboarding")).toHaveTextContent("50%")
+    expect(screen.getByTestId("detail-progress-training")).toHaveTextContent("50%")
+    // clearance empty → excluded from the overall average: (0.5 + 0.5) / 2
+    expect(screen.getByTestId("detail-progress-overall-progress")).toHaveTextContent("50%")
   })
 })
+
+const DEFAULT_TRAININGS_COUNT = 19
+
+function trainingDocRow(id: string, status: string): { id: string; data: Record<string, unknown> } {
+  return { id, data: { title: id, status } }
+}
+function clearanceDocRow(id: string, status: string): { id: string; data: Record<string, unknown> } {
+  return { id, data: { title: id, status } }
+}
+
+/* ── module read states: pending / failed-unavailable / failed-stale ─────── */
+
+describe("EmployeeDetailView — pending vs failed vs stale module states", () => {
+  it("pending modules visibly load and never fabricate default rows or counts", () => {
+    renderDetail()
+    emitProfileStage(activeStage())
+
+    // All three modules pending: loading skeleton, no rows, no banner yet.
+    expect(screen.getAllByTestId("compliance-skeleton").length).toBeGreaterThan(0)
+    expect(screen.queryByTestId("task-progress-banner")).not.toBeInTheDocument()
+    expect(screen.getByTestId("progress-overview-partial")).toBeInTheDocument()
+
+    // One module delivers while the others are still connecting.
+    emitModule("onboardingTasks", [
+      { id: "signed_offer_letter", data: { title: "x", status: "verified" } },
+    ])
+
+    expect(screen.getByTestId("module-pending-note")).toHaveTextContent(
+      "Still loading: training records, clearance records",
+    )
+    expect(screen.getByTestId("progress-partial-note")).toBeInTheDocument()
+    // The delivered module's template rows render; pending modules fabricate none.
+    expect(screen.getByTestId("category-employment_acceptance")).toBeInTheDocument()
+    expect(screen.queryByTestId("category-training_compliance")).not.toBeInTheDocument()
+    // Banner counts are partial (only onboarding requirements available).
+    const banner = screen.getByTestId("task-progress-banner")
+    expect(banner).toHaveTextContent("45") // 46 onboarding rows, 1 done
+  })
+
+  it("a failed module that never delivered: actionable error + Retry, no fabricated rows, no false empty", async () => {
+    renderDetail()
+    emitProfileStage(activeStage())
+    emitModule("onboardingTasks", [])
+    fire(() =>
+      detailCtrl!.fail("trainings", Object.assign(new Error("transport broken"), { code: "unavailable" })),
+    )
+    emitModule("clearance", [])
+
+    // Error with retry is surfaced for the failed module.
+    const errorCard = await screen.findByTestId("live-error-card")
+    expect(errorCard).toHaveTextContent(/Failed to stream some compliance requirements/)
+    expect(errorCard).toHaveTextContent("training records")
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument()
+
+    // The never-loaded training module fabricates NO 19 defaults…
+    expect(screen.queryByTestId("category-training_compliance")).not.toBeInTheDocument()
+    // …and the page never claims a genuinely-empty read.
+    expect(screen.queryByTestId("no-requirements")).not.toBeInTheDocument()
+
+    // Only ready modules render; counts must be labelled partial.
+    expect(screen.getByTestId("progress-partial-note")).toBeInTheDocument()
+    expect(screen.queryByTestId("compliance-stale-note")).not.toBeInTheDocument()
+    // Retry restarts the subscriptions with fresh state.
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }))
+    await vi.waitFor(() => {
+      expect(detailSub).toHaveBeenCalledTimes(2)
+    })
+  })
+
+  it("a failed module with EMPTY retained data has nothing to retain — partial, not stale", () => {
+    renderDetail()
+    emitProfileStage(activeStage())
+    emitReadyDetail() // all modules delivered EMPTY snapshots (19 defaults shown)
+
+    // The trainings listener goes down after its (empty) delivery.
+    fire(() => detailCtrl!.fail("trainings", Object.assign(new Error("down"), { code: "unavailable" })))
+
+    // Nothing was retained, so nothing is labelled stale — the module is
+    // simply unavailable and counts are partial.
+    expect(screen.queryByTestId("compliance-stale-note")).not.toBeInTheDocument()
+    expect(screen.queryByTestId("category-training_compliance")).not.toBeInTheDocument()
+    // 46 onboarding + 4 clearance template rows remain.
+    expect(screen.getAllByTestId("task-tile")).toHaveLength(50)
+    expect(screen.getByTestId("live-error-card")).toBeInTheDocument()
+    expect(screen.getByTestId("progress-partial-note")).toBeInTheDocument()
+  })
+
+  it("a failed module WITH retained rows keeps exactly those rows labelled stale", () => {
+    renderDetail()
+    emitProfileStage(activeStage())
+    emitReadyDetail(
+      [],
+      [trainingDocRow("start", "completed")],
+      [],
+    )
+    // All 69 were visible from the ready reads (46 + 19 + 4 templates).
+    expect(screen.getAllByTestId("task-tile")).toHaveLength(69)
+
+    // Only the trainings listener goes down after delivering its snapshot.
+    fire(() => detailCtrl!.fail("trainings", Object.assign(new Error("down"), { code: "unavailable" })))
+
+    // Retained data is shown and labelled — the stale note appears.
+    expect(screen.getByTestId("compliance-stale-note")).toBeInTheDocument()
+    const trainingCategory = screen.getByTestId("category-training_compliance")
+    expect(trainingCategory).toHaveTextContent("Stale")
+    const staleChip = screen.getByTestId("category-training_compliance-stale")
+    expect(staleChip).toBeInTheDocument()
+    // The retained REAL row stays; the other 18 defaults are not refabricated.
+    const trainingTiles = screen
+      .getByTestId("category-training_compliance")
+      .querySelectorAll("[data-testid=task-tile]")
+    expect(trainingTiles).toHaveLength(1)
+    // 46 onboarding + 1 retained training + 4 clearance.
+    expect(screen.getAllByTestId("task-tile")).toHaveLength(51)
+    expect(screen.getByTestId("live-error-card")).toBeInTheDocument()
+    expect(screen.getByTestId("progress-partial-note")).toBeInTheDocument()
+  })
+
+  it("profile failure before its first snapshot shows only the actionable error", () => {
+    renderDetail()
+    fire(() =>
+      detailCtrl!.fail("profile", Object.assign(new Error("auth down"), { code: "unavailable" })),
+    )
+
+    const errorCard = screen.getByTestId("live-error-card")
+    expect(errorCard).toHaveTextContent("Employee profile could not be streamed.")
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument()
+    expect(screen.queryByTestId("profile-header")).not.toBeInTheDocument()
+  })
+
+  it("profile failure after loading retains the header flagged stale", () => {
+    renderDetail()
+    emitProfileStage(activeStage())
+    fire(() => detailCtrl!.fail("profile", Object.assign(new Error("offline"), { code: "unavailable" })))
+
+    expect(screen.getByTestId("profile-header-stale")).toBeInTheDocument()
+    expect(screen.getByTestId("profile-header-stale")).toHaveTextContent("Ahmad Raza")
+    expect(screen.getByTestId("progress-overview")).toBeInTheDocument() // last retained modules remain
+  })
+
+  it("profile failure detaches the document modules — a violating employee's data is reset", () => {
+    renderDetail()
+    emitProfileStage(activeStage())
+    emitReadyDetail([{ id: "resume", data: { title: "Resume", status: "verified" } }])
+
+    fire(() => detailCtrl!.fail("profile", new Error("offline")))
+
+    // The engine forgets the module listeners; no retained module data is
+    // rendered alongside the error (the header itself stays retained+stale).
+    expect(screen.queryByText("1 of 3 completed")).not.toBeInTheDocument()
+  })
+})
+
+/* ── gate stages ─────────────────────────────────────────────────────────── */
+
+describe("EmployeeDetailView — ownership and existence gates", () => {
+  it("a missing employee shows the not-found panel", () => {
+    renderDetail()
+    emitProfileStage({ state: "not-found" })
+
+    expect(screen.getByTestId("employee-not-found")).toBeInTheDocument()
+    expect(screen.getByText("Employee not found")).toBeInTheDocument()
+    expect(screen.queryByTestId("profile-header")).not.toBeInTheDocument()
+    throwIfModulesAttached()
+  })
+
+  it("a foreign or non-employee account shows the not-owned panel", () => {
+    renderDetail()
+    emitProfileStage({ state: "not-owned" })
+
+    expect(screen.getByTestId("employee-not-owned")).toBeInTheDocument()
+    expect(screen.getByText("You do not have access to this employee record.")).toBeInTheDocument()
+    expect(screen.queryByTestId("profile-header")).not.toBeInTheDocument()
+    throwIfModulesAttached()
+  })
+
+  it("an unrelated employee's slow or failed listener cannot affect this page", () => {
+    renderDetail()
+    emitProfileStage(activeStage())
+    emitReadyDetail()
+
+    // Only ONE employee stream exists; the unrelated-employee listeners the
+    // old workspace-wide stream created (one per staff member) are gone.
+    expect(detailSub).toHaveBeenCalledTimes(1)
+    expect(screen.getAllByTestId("task-tile")).toHaveLength(69)
+  })
+})
+
+function throwIfModulesAttached(): void {
+  if (modulesAttached) {
+    throw new Error("document modules attached although the gate never passed")
+  }
+}
+
+/* ── header actions (unchanged semantics) ────────────────────────────────── */
 
 describe("EmployeeDetailView — header actions", () => {
   async function open_edit() {
     renderDetail()
-    fire(() => employeesCtrl.emit("users", [employee({})]))
+    emitProfileStage(activeStage())
     emitReadyDetail([])
     fireEvent.click(screen.getByRole("button", { name: "Edit Profile" }))
     await screen.findByTestId("edit-employee-dialog")
@@ -246,10 +535,8 @@ describe("EmployeeDetailView — header actions", () => {
   it("a mid-edit deactivation closes the form REACTIVELY with a dismissible notice", async () => {
     await open_edit()
 
-    // The live stream reports the employee deactivated.
-    fire(() =>
-      employeesCtrl.emit("users", [employee({ isActive: false })]),
-    )
+    // The live profile stream reports the employee deactivated.
+    emitProfileStage(activeStage({ isActive: false }))
 
     await vi.waitFor(() => {
       expect(screen.queryByTestId("edit-employee-dialog")).not.toBeInTheDocument()
@@ -258,9 +545,21 @@ describe("EmployeeDetailView — header actions", () => {
     expect(updateEmployeeMock).not.toHaveBeenCalled()
   })
 
+  it("a deletion mid-edit closes the form and reports the employee gone", async () => {
+    await open_edit()
+
+    emitProfileStage({ state: "not-found" })
+
+    await vi.waitFor(() => {
+      expect(screen.queryByTestId("edit-employee-dialog")).not.toBeInTheDocument()
+      expect(screen.getByTestId("employee-not-found")).toBeInTheDocument()
+    })
+    expect(updateEmployeeMock).not.toHaveBeenCalled()
+  })
+
   it("deactivate confirm soft-deletes through the action", async () => {
     renderDetail()
-    fire(() => employeesCtrl.emit("users", [employee({})]))
+    emitProfileStage(activeStage())
     emitReadyDetail([])
     fireEvent.click(screen.getByRole("button", { name: "Deactivate" }))
     fireEvent.click(await screen.findByRole("button", { name: "Deactivate" }))
@@ -273,7 +572,7 @@ describe("EmployeeDetailView — header actions", () => {
 
   it("deactivated employees show the Inactive badge and no edit/deactivate actions", () => {
     renderDetail()
-    fire(() => employeesCtrl.emit("users", [employee({ isActive: false })]))
+    emitProfileStage(activeStage({ isActive: false }))
     emitReadyDetail([])
 
     expect(screen.getByTestId("profile-header")).toHaveTextContent("Inactive")
@@ -282,10 +581,12 @@ describe("EmployeeDetailView — header actions", () => {
   })
 })
 
+/* ── durable setup recovery (unchanged semantics) ────────────────────────── */
+
 describe("EmployeeDetailView — durable setup recovery", () => {
   it("an incomplete setup shows the recovery banner and completes setup for the SAME uid", async () => {
     renderDetail()
-    fire(() => employeesCtrl.emit("users", [employee({ setupStatus: "incomplete" })]))
+    emitProfileStage(activeStage({ setupStatus: "incomplete" }))
     emitReadyDetail()
 
     const banner = screen.getByTestId("detail-setup-incomplete")
@@ -296,7 +597,7 @@ describe("EmployeeDetailView — durable setup recovery", () => {
       expect(completeSetupMock).toHaveBeenCalledWith({ uid: "e1", adminUid: "adm-1" })
       // The badge lives on the stream — once provisioning flips setupStatus,
       // a fresh snapshot clears the banner (no client-side hiding).
-      fire(() => employeesCtrl.emit("users", [employee({ setupStatus: "complete" })]))
+      emitProfileStage(activeStage({ setupStatus: "complete" }))
       expect(screen.queryByTestId("detail-setup-incomplete")).not.toBeInTheDocument()
     })
   })
@@ -306,7 +607,7 @@ describe("EmployeeDetailView — durable setup recovery", () => {
       new actions.EmployeeActionError("permission-denied", "permission-denied"),
     )
     renderDetail()
-    fire(() => employeesCtrl.emit("users", [employee({ setupStatus: "incomplete" })]))
+    emitProfileStage(activeStage({ setupStatus: "incomplete" }))
     emitReadyDetail()
 
     fireEvent.click(screen.getByRole("button", { name: "Complete setup" }))
@@ -314,67 +615,5 @@ describe("EmployeeDetailView — durable setup recovery", () => {
     const retryError = await screen.findByTestId("detail-setup-retry-error")
     expect(retryError).toHaveTextContent("Completing setup failed: permission-denied")
     expect(screen.getByTestId("detail-setup-incomplete")).toBeInTheDocument()
-  })
-})
-
-describe("EmployeeDetailView — error/empty semantics", () => {
-  it("profile ready but the compliance modules failed: banner + retry, no false empty", async () => {
-    renderDetail()
-    fire(() => employeesCtrl.emit("users", [employee({})]))
-    fire(() => detailCtrl.fail("onboardingTasks", Object.assign(new Error("transport broken"), { code: "unavailable" })))
-    fire(() => detailCtrl.emit("trainings", detailStreams.EMPTY_DETAIL))
-    fire(() => detailCtrl.emit("clearance", detailStreams.EMPTY_DETAIL))
-
-    // Since one stream errored, the page never claims "No compliance requirements found."
-    expect(screen.queryByTestId("no-requirements")).not.toBeInTheDocument()
-    await screen.findByText(/could not be streamed/)
-    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument()
-    // The FAILED module's template rows are never fabricated as progress:
-    // its categories vanish, while successfully loaded modules still show
-    // their (empty) template rows — labelled stale.
-    expect(screen.queryByTestId("category-competency_forms")).not.toBeInTheDocument()
-    expect(screen.getByTestId("category-training_compliance")).toBeInTheDocument()
-    expect(await screen.findByTestId("compliance-stale-note")).toBeInTheDocument()
-  })
-
-  it("ready + a fresh employee (zero document modules) renders the full Dart default checklist", () => {
-    renderDetail()
-    fire(() => employeesCtrl.emit("users", [employee({})]))
-    emitReadyDetail([])
-
-    // Dart parity: the 46/19/4 templates render as notStarted defaults even
-    // though no docs exist in Firestore — a merged empty read is NOT an
-    // empty compliance state.
-    expect(screen.getAllByTestId("task-tile")).toHaveLength(59)
-    const banner = screen.getByTestId("task-progress-banner")
-    expect(banner).toHaveTextContent("Completed")
-    expect(banner).toHaveTextContent("0")
-    expect(banner).toHaveTextContent("59")
-    expect(screen.queryByTestId("no-requirements")).not.toBeInTheDocument()
-  })
-
-  it("compliance failure with retained data keeps the stale list labelled stale", async () => {
-    renderDetail()
-    fire(() => employeesCtrl.emit("users", [employee({})]))
-    emitReadyDetail([{ id: "resume", data: { title: "Resume", status: "submitted" } }])
-
-    fire(() =>
-      detailCtrl.fail("onboardingTasks", Object.assign(new Error("down"), { code: "unavailable" })),
-    )
-    fire(() => detailCtrl.emit("trainings", detailStreams.EMPTY_DETAIL))
-    fire(() => detailCtrl.emit("clearance", detailStreams.EMPTY_DETAIL))
-
-    expect(await screen.findByTestId("compliance-stale-note")).toBeInTheDocument()
-    expect(screen.getAllByTestId("task-tile").length).toBeGreaterThan(0)
-    expect(screen.getByTestId("task-progress-banner")).toBeInTheDocument()
-  })
-
-  it("an unknown uid (ready read, employee absent) shows the not-found panel", () => {
-    renderDetail()
-    fire(() => employeesCtrl.emit("users", []))
-    emitReadyDetail([])
-
-    expect(screen.getByTestId("employee-not-found")).toBeInTheDocument()
-    expect(screen.getByText("Employee not found")).toBeInTheDocument()
   })
 })

@@ -26,6 +26,7 @@ import type {
   ComplianceAlert,
 } from "@/lib/admin/dashboard-models"
 import type { LiveStreamController } from "@/lib/admin/stream-protocol"
+import { computeModuleProgress } from "@/lib/admin/progress-models"
 
 /**
  * Real-time Firestore subscriptions for the admin dashboard — a faithful
@@ -62,7 +63,7 @@ function toDate(value: unknown): Date | null {
   return null
 }
 
-function str(value: unknown, fallback: string | null = null): string | null {
+export function str(value: unknown, fallback: string | null = null): string | null {
   return typeof value === "string" && value.length > 0 ? value : fallback
 }
 
@@ -326,51 +327,25 @@ export function subscribeAdminEmployeesProgress(
       const trainingDocs = watchers?.trainingDocs?.docs ?? []
       const clearanceDocs = watchers?.clearanceDocs?.docs ?? []
 
-      // ── onboarding tasks (failed tasks excluded, mirrors Flutter) ──
-      const relevantTasks = taskDocs.filter((t) => {
-        const data = t.data()
-        const status = parseTaskStatus(data.status)
-        return status !== "noActionRequired"
+      // Shared pure progress formulas (progress-models.ts) — the SAME
+      // implementation the Dashboard stats and the Detail page use.
+      const progress = computeModuleProgress({
+        tasks: taskDocs.map((t) => ({
+          status: parseTaskStatus(t.data().status),
+          isCompleted: t.data().isCompleted === true,
+        })),
+        trainings: trainingDocs.map((t) => ({ status: t.data().status })),
+        clearances: clearanceDocs.map((t) => ({ status: t.data().status })),
       })
-      const totalTasks = relevantTasks.length
-      const completedTasks = relevantTasks.filter((t) => t.data().isCompleted === true).length
-      const onboardingPct = totalTasks === 0 ? 0 : completedTasks / totalTasks
-
-      // ── trainings ──
-      const totalTrainings = trainingDocs.length
-      const completedTrainings = trainingDocs.filter((t) => t.data().status === "completed").length
-      const trainingPct = totalTrainings === 0 ? 0 : completedTrainings / totalTrainings
-
-      // ── clearance ──
-      const totalClearances = clearanceDocs.length
-      const completedClearances = clearanceDocs.filter((t) => t.data().status === "verified").length
-      const clearancePct = totalClearances === 0 ? 0 : completedClearances / totalClearances
-
-      // ── overall (average of modules that contain data) ──
-      let activeModules = 0
-      let sumProgress = 0
-      if (totalTasks > 0) {
-        activeModules++
-        sumProgress += onboardingPct
-      }
-      if (totalTrainings > 0) {
-        activeModules++
-        sumProgress += trainingPct
-      }
-      if (totalClearances > 0) {
-        activeModules++
-        sumProgress += clearancePct
-      }
-      const overallPct = activeModules === 0 ? 0 : sumProgress / activeModules
 
       return {
         uid: employee.uid,
         name: employee.name,
         email: employee.email,
-        overallProgress: overallPct,
-        onboardingProgress: onboardingPct,
-        trainingProgress: trainingPct,
-        clearanceProgress: clearancePct,
+        overallProgress: progress.overall,
+        onboardingProgress: progress.onboarding,
+        trainingProgress: progress.training,
+        clearanceProgress: progress.clearance,
         lastLogin: employee.lastLogin,
         isActive: employee.isActive,
         setupStatus: employee.setupStatus,

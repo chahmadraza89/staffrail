@@ -41,6 +41,10 @@ export interface LiveQueryResult<TData> {
   error: Error | null
   /** Announced listeners that never delivered anything yet. */
   pending: ReadonlySet<string>
+  /** Listeners that delivered their initial snapshot (and, until their next
+   * event, still hold whatever their last good data was — even if they have
+   * since failed: failed-but-ready === failed WITH retained data). */
+  ready: ReadonlySet<string>
   /** All unresolved per-listener errors, for diagnostics. */
   errors: ReadonlyMap<string, Error>
   /** Retry disposes the current subscription set and starts a fresh one. */
@@ -128,6 +132,7 @@ export function useLiveQuery<TData>({
     status: state.status,
     error: state.error,
     pending: state.pending,
+    ready: state.ready,
     errors: state.errors,
     retry,
   }

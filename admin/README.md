@@ -243,30 +243,55 @@ empty-state message is shown.
 
 Port of the Flutter `AdminDirectoryInnerProfileCard` screen. Data model:
 
-- The **profile header + progress bars** reuse `subscribeAdminEmployeesProgress`
-  (single-sourced with the Directory cards' progress formulas).
-- The **three document modules** (`onboarding_tasks` / `trainings` /
-  `clearance`) stream via `subscribeEmployeeDetail` in
-  `src/lib/admin/employee-detail-streams.ts`.
-- `src/lib/admin/compliance-helpers.ts` is a faithful port of
-  `ComplianceHelpers` + the Dart merge Builder. Preserved Dart quirks (do
-  not "fix" without changing the Flutter app too):
-  1. Template title/actionType override the live document's own values
-     (guards against the buggy "Onboarding Task" duplicate titles).
-  2. Onboarding docs not among the 46 templates are appended as dynamic
-     tasks, but extra trainings/clearances are dropped (Dart only maps the
-     19/4 default lists).
-  3. A task id matching NO category id list falls out of the category view
-     (e.g. `tax_documents_w_4`); two Category-2 ids
-     (`corporate_confidentiality_statement`,
-     `transportation_acknowledgement_statement`) have no default task, so a
-     fresh employee shows 3/21/6/3/3/19/4 = 59 rows, matching Flutter.
-- **Failed module ≠ fabricated data**: when one module's stream errors, its
-  template entries are NOT rendered as if they were real pending work
-  (`buildComplianceModel` receives `null` for a failed module); other
-  modules keep their Dart default template rows, labelled stale. This is a
-  deliberate hardening over Flutter, which would render all 69 defaults
-  even while its loaders fail.
+- **Single-employee subscription.** The page never subscribes to the
+  workspace-wide employees stream. `subscribeEmployeeDetail(employeeId, adminUid)`
+  attaches exactly FOUR listeners independent of staff count:
+  `doc(users/{employeeId})` first (the ownership gate), then — only after the
+  gate confirmed `doc.adminId === adminUid && doc.role === "employee"` — the
+  three document modules (`onboarding_tasks` / `trainings` / `clearance`).
+  A deletion, ownership/role change, or profile failure STOPS and resets the
+  document-module listeners (generation-token guarded against late callbacks)
+  and shows the not-found / not-owned panel. The same module snapshots feed
+  BOTH the checklist grouping and the progress bars, through the shared pure
+  formulas in `src/lib/admin/progress-models.ts` (identical to Dashboard and
+  Directory — onboarding counts the `isCompleted` flag over tasks whose
+  status is not `noActionRequired`; training raw `completed`; clearance raw
+  `verified`; overall averages only the modules that contain data).
+- `src/lib/admin/compliance-helpers.ts` is a port of `ComplianceHelpers` +
+  the Dart merge Builder **with documented corrections** (the Dart behavior
+  hid requirements; no Firestore record is touched by this fix):
+  1. Template title/actionType still override the live document's own
+     values (guards against the buggy "Onboarding Task" duplicate titles).
+  2. The ten seeded ids the Dart category lists predates — 8 policy
+     acknowledgments plus `tax_documents_w_4` / `tax_documents_w_1` — were
+     invisible in Flutter; they are Category 2 here.
+  3. Onboarding records matching no category list land in a visible
+     **"Additional Requirements"** fallback group instead of vanishing
+     (Flutter's `tax_documents_w_4`, custom forms, …).
+  4. Custom and retained-legacy trainings/clearances are appended after the
+     19/4 template rows instead of being dropped.
+  5. Identity is `source + document id` (see `subtaskKey`): identical ids in
+     different modules are distinct requirements and both stay visible
+     (the Dart code dropped one side of such collisions). Two Category-2
+     ids (`corporate_confidentiality_statement`,
+     `transportation_acknowledgement_statement`) still have no default task —
+     they materialize only when such a doc exists, as in Dart.
+  → A fresh employee shows 3/**31**/6/3/3/19/4 = **69 rows** (+ an empty
+  fallback group), i.e. all 46 onboarding + 19 training + 4 clearance
+  requirements, instead of Flutter's 59.
+- **Module read states are explicit** (pending / ready / failed) and drive
+  what may be rendered:
+  - A module still connecting renders a loading state — its requirements
+    are never fabricated, and counts are labelled partial.
+  - A module that fails BEFORE delivering anything shows the actionable
+    error + Retry and contributes nothing — template defaults are never
+    mislabelled as retained results.
+  - A module that fails after delivering keeps exactly its delivered rows,
+    labelled with a per-category "Stale" chip + the stale note; empty
+    retained reads retain nothing. Counts are partial whenever any module
+    is unavailable.
+  This is a deliberate hardening over Flutter, which renders all 69
+  defaults even while its loaders fail.
 - The Dart "No compliance requirements found." copy is kept but effectively
   unreachable (template-backed categories are never all-empty on a ready
   read), exactly like the Flutter source.

@@ -15,21 +15,25 @@ import {
 } from "lucide-react"
 
 import {
-  subscribeAdminEmployeesProgress,
-} from "@/lib/admin/dashboard-streams"
-import type { AdminEmployeeProgress } from "@/lib/admin/dashboard-models"
-import {
+  MODULE_IDS,
+  MODULE_LABELS,
+  moduleForSource,
   subscribeEmployeeDetail,
   EMPTY_DETAIL,
+  type EmployeeProfileDetail,
   type EmployeeDetailSnapshot,
+  type ModuleId,
 } from "@/lib/admin/employee-detail-streams"
 import {
   buildComplianceModel,
+  subtaskKey,
   taskProgressStats,
   taskStatusText,
   type ComplianceCategory,
   type DetailSubTask,
+  type ModuleRead,
 } from "@/lib/admin/compliance-helpers"
+import { computeModuleProgress } from "@/lib/admin/progress-models"
 import { getInitials } from "@/lib/admin/directory-format"
 import {
   completeEmployeeSetup,
@@ -56,17 +60,42 @@ import { Progress } from "@/components/ui/progress"
  * Employee Profile Detail view — port of the Flutter
  * AdminDirectoryInnerProfileCard (profile header + ProgressOverview +
  * TaskManagerSection) plus the directory's lifecycle actions:
- *   - live profile via subscribeAdminEmployeesProgress (same progress
- *     formulas as the Directory cards — single-sourced)
- *   - live onboarding_tasks/trainings/clearance below
- *     subscribeEmployeeDetail, merged + grouped into the Dart 7 categories
+ *
+ *   - SINGLE-employee subscription: `subscribeEmployeeDetail` attaches the
+ *     profile doc first and only then the three document modules, AFTER the
+ *     ownership gate (doc.adminId === adminUid && role === "employee")
+ *     passed — the workspace-wide employees stream is never subscribed
+ *     here, so unrelated employees' listeners cannot affect this page.
+ *   - The module snapshots feed BOTH the checklist grouping and the shared
+ *     progress formulas (progress-models.ts, identical to Dashboard/Directory).
+ *   - Module read states are explicit: pending modules visibly load and
+ *     never fabricate default rows; failed modules show an actionable
+ *     banner + Retry; previously delivered data is retained and labelled
+ *     stale — never-loaded data never is. Counts are labelled partial
+ *     whenever requirements are unavailable.
  *   - Edit (transactional), Deactivate (soft delete) with the same
- *     derived-staleness dialogs, and the durable "Complete setup"
- *     recovery for incomplete provisioning.
+ *     derived-staleness dialogs, and the durable "Complete setup" recovery.
  * Task detail/review panel arrives with the next step.
  */
 
-const EMPTY_EMPLOYEES: AdminEmployeeProgress[] = []
+type ModuleUiState = "pending" | "ready" | "failed-stale" | "failed-unavailable"
+
+function resolveModuleUi(
+  errors: ReadonlyMap<string, Error>,
+  ready: ReadonlySet<string>,
+  id: ModuleId,
+  /** Whether the module's last delivered snapshot carried any rows. */
+  hasRetainedItems: boolean,
+): ModuleUiState {
+  if (errors.has(id)) {
+    // A failed listener stays in `ready` if it EVER delivered — but a stale
+    // label is only honest when the retained snapshot actually carried
+    // rows: an empty retained read retains NOTHING (never describe
+    // never-loaded defaults as retained results).
+    return ready.has(id) && hasRetainedItems ? "failed-stale" : "failed-unavailable"
+  }
+  return ready.has(id) ? "ready" : "pending"
+}
 
 export function EmployeeDetailView({
   employeeId,
@@ -83,53 +112,96 @@ export function EmployeeDetailView({
   const [setupRetrying, setSetupRetrying] = useState(false)
   const [setupRetryError, setSetupRetryError] = useState<string | null>(null)
 
-  const subscribeProgress = useCallback(
-    (ctrl: Parameters<typeof subscribeAdminEmployeesProgress>[1]) =>
-      subscribeAdminEmployeesProgress(adminUid, ctrl),
-    [adminUid],
-  )
-  const employees = useLiveQuery<AdminEmployeeProgress[]>({
-    key: adminUid,
-    subscribe: subscribeProgress,
-    initialData: EMPTY_EMPLOYEES,
-  })
-
   const subscribeDetail = useCallback(
-    (ctrl: Parameters<typeof subscribeEmployeeDetail>[1]) =>
-      subscribeEmployeeDetail(employeeId, ctrl),
-    [employeeId],
+    (ctrl: Parameters<typeof subscribeEmployeeDetail>[2]) =>
+      subscribeEmployeeDetail(employeeId, adminUid, ctrl),
+    [employeeId, adminUid],
   )
+  // The key covers BOTH identifiers: a different signed-in admin or a
+  // different employee route must always restart a fresh subscription.
   const detail = useLiveQuery<EmployeeDetailSnapshot>({
-    key: employeeId,
+    key: `${adminUid}|${employeeId}`,
     subscribe: subscribeDetail,
     initialData: EMPTY_DETAIL,
   })
 
-  const employee = useMemo(
-    () => employees.data.find((entry) => entry.uid === employeeId) ?? null,
-    [employees.data, employeeId],
+  const stage = detail.data.profile
+  const employee = stage?.state === "active" ? stage.employee : null
+  const errors = detail.errors
+
+  const moduleUi = useMemo(() => {
+    const retainedHasItems: Record<ModuleId, boolean> = {
+      onboardingTasks: detail.data.tasks.length > 0,
+      trainings: detail.data.trainings.length > 0,
+      clearance: detail.data.clearances.length > 0,
+    }
+    const states = {} as Record<ModuleId, ModuleUiState>
+    for (const id of MODULE_IDS) {
+      states[id] = resolveModuleUi(detail.errors, detail.ready, id, retainedHasItems[id])
+    }
+    return states
+  }, [detail.data, detail.errors, detail.ready])
+
+  const partialModules = MODULE_IDS.filter((id) => moduleUi[id] !== "ready")
+  const staleModules = MODULE_IDS.filter((id) => moduleUi[id] === "failed-stale")
+  const pendingModules = MODULE_IDS.filter((id) => moduleUi[id] === "pending")
+  const failedModules = MODULE_IDS.filter(
+    (id) => moduleUi[id] === "failed-stale" || moduleUi[id] === "failed-unavailable",
   )
+  const allModulesPending = MODULE_IDS.every((id) => moduleUi[id] === "pending")
+  const allModulesReady = MODULE_IDS.every((id) => moduleUi[id] === "ready")
+
+  const moduleRead = <T,>(
+    id: ModuleId,
+    items: T[],
+  ): ModuleRead<T> =>
+    moduleUi[id] === "ready"
+      ? { kind: "ready", items }
+      : moduleUi[id] === "pending"
+        ? { kind: "pending" }
+        : // failed: retained items only if this listener ever delivered —
+          // never-loaded modules contribute nothing (no fabrication).
+          detail.ready.has(id)
+          ? { kind: "failed", items }
+          : { kind: "failed", items: [] }
 
   const categories = useMemo(
     () =>
       buildComplianceModel({
-        // A FAILED module's templates must never be fabricated as progress —
-        // pass null so that module contributes nothing; the error banner
-        // explains what did not load.
-        tasks: detail.errors.has("onboardingTasks") ? null : detail.data.tasks,
-        trainings: detail.errors.has("trainings") ? null : detail.data.trainings,
-        clearances: detail.errors.has("clearance") ? null : detail.data.clearances,
+        tasks: moduleRead("onboardingTasks", detail.data.tasks),
+        trainings: moduleRead("trainings", detail.data.trainings),
+        clearances: moduleRead("clearance", detail.data.clearances),
       }).categories,
-    [detail.data, detail.errors],
+    // Module read states are derived above; the model recomputes whenever
+    // the underlying engine state changes (data, or ready/error flips).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [detail.data, detail.errors, detail.ready],
   )
   const progressStats = useMemo(() => taskProgressStats(categories), [categories])
+
+  // Progress bars reuse the SAME module snapshots as the checklist, through
+  // the shared Dashboard/Directory formulas (unavailable modules contribute
+  // nothing — zero-total modules are excluded from the overall average).
+  const progress = useMemo(
+    () =>
+      computeModuleProgress({
+        tasks: detail.ready.has("onboardingTasks")
+          ? detail.data.tasks.map((task) => ({ status: task.status, isCompleted: task.isCompleted }))
+          : [],
+        trainings: detail.ready.has("trainings")
+          ? detail.data.trainings.map((training) => ({ status: training.status }))
+          : [],
+        clearances: detail.ready.has("clearance")
+          ? detail.data.clearances.map((clearance) => ({ status: clearance.status }))
+          : [],
+      }),
+    [detail.data, detail.ready],
+  )
 
   // Staleness is DERIVED (never an effect): the dialog closes reactively
   // when the live stream reports the target deactivated or removed.
   const showStaleEditNotice =
-    editOpen &&
-    (employee === null || !employee.isActive) &&
-    !staleNoticeDismissed
+    editOpen && (employee === null || !employee.isActive) && !staleNoticeDismissed
   const staleEditNoticeCompleted = employee === null
 
   const handleCompleteSetup = useCallback(async () => {
@@ -164,33 +236,37 @@ export function EmployeeDetailView({
         </div>
       </header>
 
-      {employees.status === "connecting" ? (
-        <DetailSkeleton testId="detail-skeleton" />
-      ) : employees.status === "error" ? (
-        <div className="space-y-4">
-          <LiveErrorCard
-            error={employees.error}
-            retry={employees.retry}
-            what="Employee profile could not be streamed."
-          />
-          {employee ? (
-            <ProfileHeader
-              employee={employee}
-              onEdit={() => {
-                setStaleNoticeDismissed(false)
-                setEditOpen(true)
-              }}
-              onDeactivate={() => setConfirmOpen(true)}
-              onRetainStale
+      {stage === null ? (
+        errors.has("profile") ? (
+          // The profile stream failed before its first snapshot: the page
+          // shows only the actionable error (there is nothing to retain).
+          <div className="space-y-4">
+            <LiveErrorCard
+              error={errors.get("profile") ?? errors.get("onboardingTasks") ?? detail.error}
+              retry={detail.retry}
+              what="Employee profile could not be streamed."
             />
-          ) : null}
-        </div>
-      ) : employee === null ? (
+          </div>
+        ) : (
+          <DetailSkeleton testId="detail-skeleton" />
+        )
+      ) : stage.state === "not-found" ? (
         <NotFoundPanel />
+      ) : stage.state === "not-owned" ? (
+        <NotOwnedPanel />
       ) : (
         <>
+          {errors.has("profile") ? (
+            <LiveErrorCard
+              error={errors.get("profile") ?? null}
+              retry={detail.retry}
+              what="Employee profile could not be streamed — the header below is the last retained snapshot."
+            />
+          ) : null}
+
           <ProfileHeader
-            employee={employee}
+            employee={stage.employee}
+            stale={errors.has("profile")}
             onEdit={() => {
               setStaleNoticeDismissed(false)
               setEditOpen(true)
@@ -198,14 +274,14 @@ export function EmployeeDetailView({
             onDeactivate={() => setConfirmOpen(true)}
           />
 
-          {employee.setupStatus === "incomplete" ? (
+          {stage.employee.setupStatus === "incomplete" ? (
             <div
               data-testid="detail-setup-incomplete"
               className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700"
             >
               <p>
-                <strong>{employee.name}</strong>&rsquo;s onboarding documents could not be set
-                up yet — completing setup continues with the SAME account.
+                <strong>{stage.employee.name}</strong>&rsquo;s onboarding documents could not be
+                set up yet — completing setup continues with the SAME account.
               </p>
               <Button size="sm" variant="outline" onClick={() => void handleCompleteSetup()} disabled={setupRetrying}>
                 {setupRetrying ? <Loader2 className="mr-1.5 size-3.5 animate-spin" /> : null}
@@ -226,9 +302,20 @@ export function EmployeeDetailView({
             </div>
           ) : null}
 
-          <ProgressOverview employee={employee} />
+          <ProgressOverview progress={progress} partial={partialModules.length > 0} />
 
-          <ComplianceSection detail={detail} categories={categories} progressStats={progressStats} />
+          <ComplianceSection
+            categories={categories}
+            progressStats={progressStats}
+            allModulesPending={allModulesPending}
+            allModulesReady={allModulesReady}
+            failedModules={failedModules}
+            pendingModules={pendingModules}
+            partialModules={partialModules}
+            staleModules={staleModules}
+            error={detail.error}
+            retry={detail.retry}
+          />
 
           <EditEmployeeDialog
             open={editOpen && employee !== null && employee.isActive}
@@ -244,7 +331,7 @@ export function EmployeeDetailView({
         </>
       )}
 
-      {showStaleEditNotice && employee ? (
+      {showStaleEditNotice ? (
         <div
           role="status"
           data-testid="stale-edit-notice"
@@ -254,7 +341,7 @@ export function EmployeeDetailView({
           <p className="flex-1">
             {staleEditNoticeCompleted
               ? "This employee no longer exists — the edit form was closed."
-              : `${employee.name} was deactivated — deactivated employees can no longer be edited, so the form was closed.`}
+              : `${employee?.name ?? "This employee"} was deactivated — deactivated employees can no longer be edited, so the form was closed.`}
           </p>
           <Button size="sm" variant="ghost" onClick={() => setStaleNoticeDismissed(true)}>
             Dismiss
@@ -310,6 +397,7 @@ function LiveErrorCard({
   return (
     <div
       role="alert"
+      data-testid="live-error-card"
       className="flex items-center justify-between gap-3 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
     >
       <p>
@@ -329,6 +417,27 @@ function NotFoundPanel() {
     <div data-testid="employee-not-found" className="flex flex-col items-center gap-3 rounded-lg border border-dashed py-16 text-center">
       <CircleUser className="text-muted-foreground size-8" />
       <p className="text-muted-foreground text-sm">Employee not found</p>
+      <p className="text-muted-foreground text-xs">
+        The document-module listeners were stopped and reset.
+      </p>
+      <Button asChild size="sm" variant="outline">
+        <Link href="/dashboard/directory">Back to directory</Link>
+      </Button>
+    </div>
+  )
+}
+
+function NotOwnedPanel() {
+  return (
+    <div data-testid="employee-not-owned" className="flex flex-col items-center gap-3 rounded-lg border border-dashed py-16 text-center">
+      <CircleUser className="text-muted-foreground size-8" />
+      <p className="text-muted-foreground text-sm">
+        You do not have access to this employee record.
+      </p>
+      <p className="text-muted-foreground text-xs">
+        The record belongs to another admin or is not an employee account. Document-module
+        listeners were stopped and reset.
+      </p>
       <Button asChild size="sm" variant="outline">
         <Link href="/dashboard/directory">Back to directory</Link>
       </Button>
@@ -340,17 +449,17 @@ function NotFoundPanel() {
 
 function ProfileHeader({
   employee,
+  stale,
   onEdit,
   onDeactivate,
-  onRetainStale,
 }: {
-  employee: AdminEmployeeProgress
+  employee: EmployeeProfileDetail
+  stale: boolean
   onEdit: () => void
   onDeactivate: () => void
-  onRetainStale?: boolean
 }) {
   return (
-    <Card data-testid={onRetainStale ? "profile-header-stale" : "profile-header"}>
+    <Card data-testid={stale ? "profile-header-stale" : "profile-header"}>
       <CardContent className="flex flex-wrap items-center gap-4 p-5">
         <span
           aria-hidden
@@ -368,6 +477,11 @@ function ProfileHeader({
         <Badge variant={employee.isActive ? "secondary" : "outline"}>
           {employee.isActive ? "Active" : "Inactive"}
         </Badge>
+        {stale ? (
+          <span className="rounded-md border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700">
+            Stale
+          </span>
+        ) : null}
         {employee.setupStatus === "incomplete" ? (
           <span className="border-amber-200 bg-amber-50 text-amber-700 rounded-md border px-2 py-0.5 text-xs font-medium">
             Setup incomplete
@@ -419,7 +533,10 @@ function DetailBar({
 }) {
   const pct = percent(value)
   return (
-    <div className={large ? "space-y-1.5" : "space-y-1"}>
+    <div
+      className={large ? "space-y-1.5" : "space-y-1"}
+      data-testid={`detail-progress-${label.toLowerCase().replace(/\s+/g, "-")}`}
+    >
       <div className="flex items-center justify-between text-xs">
         <span className={large ? "font-medium" : "text-muted-foreground"}>{label}</span>
         <span className={large ? "font-semibold tabular-nums" : "text-muted-foreground tabular-nums"}>
@@ -429,76 +546,136 @@ function DetailBar({
       <Progress
         value={pct}
         aria-label={`${label} progress ${pct}%`}
-        data-testid={`detail-progress-${label.toLowerCase().replace(/\s+/g, "-")}`}
         className={`h-2 ${BAR_TONES[tone]}`}
       />
     </div>
   )
 }
 
-function ProgressOverview({ employee }: { employee: AdminEmployeeProgress }) {
+function ProgressOverview({
+  progress,
+  partial,
+}: {
+  progress: ReturnType<typeof computeModuleProgress>
+  partial: boolean
+}) {
   return (
     <Card data-testid="progress-overview">
       <CardContent className="space-y-4 p-5">
-        <DetailBar label="Overall Progress" value={employee.overallProgress} tone="primary" large />
+        <DetailBar label="Overall Progress" value={progress.overall} tone="primary" large />
         <div className="grid gap-4 md:grid-cols-2">
-          <DetailBar label="Onboarding" value={employee.onboardingProgress} tone="blue" />
-          <DetailBar label="Training" value={employee.trainingProgress} tone="amber" />
+          <DetailBar label="Onboarding" value={progress.onboarding} tone="blue" />
+          <DetailBar label="Training" value={progress.training} tone="amber" />
         </div>
+        {partial ? (
+          <p data-testid="progress-overview-partial" className="text-muted-foreground text-xs">
+            Progress bars are partial — some required sections are still loading or unavailable.
+          </p>
+        ) : null}
       </CardContent>
     </Card>
   )
 }
 
-/* ── compliance section (TaskManagerSection, checklist-lite) ───────────── */
+/* ── compliance section (TaskManagerSection, checklist-lite) ──────────── */
+
+function describeModules(ids: ModuleId[]): string {
+  return ids.map((id) => MODULE_LABELS[id]).join(", ")
+}
 
 function ComplianceSection({
-  detail,
   categories,
   progressStats,
+  allModulesPending,
+  allModulesReady,
+  failedModules,
+  pendingModules,
+  partialModules,
+  staleModules,
+  error,
+  retry,
 }: {
-  detail: ReturnType<typeof useLiveQuery<EmployeeDetailSnapshot>>
   categories: ComplianceCategory[]
   progressStats: { completed: number; remaining: number }
+  allModulesPending: boolean
+  allModulesReady: boolean
+  failedModules: ModuleId[]
+  pendingModules: ModuleId[]
+  partialModules: ModuleId[]
+  staleModules: ModuleId[]
+  error: Error | null
+  retry: () => void
 }) {
+  // Stale categories: a category is stale when its OWNING module holds
+  // retained (previously delivered) data behind a live failure.
+  const staleCategory = (category: ComplianceCategory): boolean => {
+    if (staleModules.length === 0 || category.tasks.length === 0) {
+      return false
+    }
+    return staleModules.includes(moduleForSource(category.tasks[0].taskSource))
+  }
+  const unavailableModules = failedModules.filter((id) => !staleModules.includes(id))
+  const partialSegments = [
+    pendingModules.length > 0 ? `still loading: ${describeModules(pendingModules)}` : null,
+    staleModules.length > 0 ? `retained stale: ${describeModules(staleModules)}` : null,
+    unavailableModules.length > 0 ? `unavailable: ${describeModules(unavailableModules)}` : null,
+  ].filter((segment): segment is string => segment !== null)
+
   return (
     <section className="space-y-4">
       <h2 className="text-lg font-semibold tracking-tight">Compliance Categories</h2>
 
-      {detail.status === "connecting" ? (
+      {allModulesPending ? (
+        // Nothing has ever loaded — a real loading state, not an empty one.
         <DetailSkeleton testId="compliance-skeleton" />
-      ) : detail.status === "error" ? (
-        <div className="space-y-2">
-          <LiveErrorCard
-            error={detail.error}
-            retry={detail.retry}
-            what="Compliance documents could not be streamed."
-          />
+      ) : (
+        <div className="space-y-3">
+          {failedModules.length > 0 ? (
+            <LiveErrorCard
+              error={error}
+              retry={retry}
+              what={`Failed to stream some compliance requirements (${describeModules(failedModules)}).`}
+            />
+          ) : null}
+
+          {pendingModules.length > 0 ? (
+            <p
+              data-testid="module-pending-note"
+              className="text-muted-foreground flex items-center gap-2 text-xs"
+            >
+              <Loader2 aria-hidden className="size-3.5 animate-spin" />
+              Still loading: {describeModules(pendingModules)}…
+            </p>
+          ) : null}
+
           {categories.some((category) => category.tasks.length > 0) ? (
             <>
-              <p data-testid="compliance-stale-note" className="text-muted-foreground text-xs">
-                These tasks are stale — retained from the last successful update. Retry to refresh.
-              </p>
+              {staleModules.length > 0 ? (
+                <p data-testid="compliance-stale-note" className="text-muted-foreground text-xs">
+                  Sections shown with a &ldquo;Stale&rdquo; marker hold retained data from the
+                  last successful update ({describeModules(staleModules)}). Retry to refresh.
+                </p>
+              ) : null}
+              {partialModules.length > 0 ? (
+                <p data-testid="progress-partial-note" className="text-muted-foreground text-xs">
+                  Counts are partial — some requirements are unavailable ({partialSegments.join("; ")}).
+                </p>
+              ) : null}
               <TaskProgressBanner stats={progressStats} />
-              <CategoryList categories={categories} />
+              <CategoryList categories={categories} staleCategory={staleCategory} />
             </>
+          ) : allModulesReady ? (
+            // Dart parity: 'No compliance requirements found.' only after a
+            // fully ready read — never for a failed or still-loading read.
+            <div
+              className="text-muted-foreground flex flex-col items-center gap-2 rounded-lg border border-dashed py-12 text-center text-sm"
+              data-testid="no-requirements"
+            >
+              <Hourglass className="text-muted-foreground size-6" />
+              No compliance requirements found.
+            </div>
           ) : null}
         </div>
-      ) : categories.every((category) => category.tasks.length === 0) ? (
-        // Dart parity: 'No compliance requirements found.' only after a
-        // ready read — never for a failed or still-loading read.
-        <div
-          className="text-muted-foreground flex flex-col items-center gap-2 rounded-lg border border-dashed py-12 text-center text-sm"
-          data-testid="no-requirements"
-        >
-          <Hourglass className="text-muted-foreground size-6" />
-          No compliance requirements found.
-        </div>
-      ) : (
-        <>
-          <TaskProgressBanner stats={progressStats} />
-          <CategoryList categories={categories} />
-        </>
       )}
     </section>
   )
@@ -525,24 +702,46 @@ function StatBlock({ label, value }: { label: string; value: number }) {
   )
 }
 
-function CategoryList({ categories }: { categories: ComplianceCategory[] }) {
+function CategoryList({
+  categories,
+  staleCategory,
+}: {
+  categories: ComplianceCategory[]
+  staleCategory: (category: ComplianceCategory) => boolean
+}) {
   return (
     <div className="space-y-4">
       {categories
         .filter((category) => category.tasks.length > 0)
         .map((category) => (
-          <CategoryBlock key={category.id} category={category} />
+          <CategoryBlock key={category.id} category={category} stale={staleCategory(category)} />
         ))}
     </div>
   )
 }
 
-function CategoryBlock({ category }: { category: ComplianceCategory }) {
+function CategoryBlock({
+  category,
+  stale,
+}: {
+  category: ComplianceCategory
+  stale: boolean
+}) {
   return (
     <Card data-testid={`category-${category.id}`}>
       <CardContent className="space-y-2 p-5">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <h3 className="text-sm font-semibold">{category.title}</h3>
+          <h3 className="text-sm font-semibold">
+            {category.title}
+            {stale ? (
+              <span
+                data-testid={`category-${category.id}-stale`}
+                className="border-amber-200 bg-amber-50 text-amber-700 ml-2 rounded-md border px-1.5 py-0.5 align-middle text-xs font-medium"
+              >
+                Stale
+              </span>
+            ) : null}
+          </h3>
           <span className="text-muted-foreground text-xs">{category.subtitle}</span>
         </div>
         <TaskTileList tasks={category.tasks} />
@@ -583,7 +782,7 @@ function TaskTileList({ tasks }: { tasks: DetailSubTask[] }) {
         const toneKey = done ? "green" : toneForStatus(task.status)
         return (
           <li
-            key={task.id}
+            key={subtaskKey(task)}
             className="hover:bg-muted/40 flex items-center gap-3 rounded-md px-2 py-2 text-sm"
             data-testid="task-tile"
           >
@@ -622,7 +821,7 @@ function EditEmployeeDialog({
   onClose,
 }: {
   open: boolean
-  employee: AdminEmployeeProgress | null
+  employee: EmployeeProfileDetail | null
   onClose: () => void
 }) {
   const [submitting, setSubmitting] = useState(false)
@@ -713,7 +912,7 @@ function DeactivateConfirmDialog({
   onClose,
 }: {
   open: boolean
-  employee: AdminEmployeeProgress | null
+  employee: EmployeeProfileDetail | null
   onClose: () => void
 }) {
   const [submitting, setSubmitting] = useState(false)

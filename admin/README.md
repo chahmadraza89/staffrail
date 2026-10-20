@@ -255,8 +255,9 @@ Port of the Flutter `AdminDirectoryInnerProfileCard` screen. Data model:
   BOTH the checklist grouping and the progress bars, through the shared pure
   formulas in `src/lib/admin/progress-models.ts` (identical to Dashboard and
   Directory — onboarding counts the `isCompleted` flag over tasks whose
-  status is not `noActionRequired`; training raw `completed`; clearance raw
-  `verified`; overall averages only the modules that contain data).
+  status is not `noActionRequired`; training raw `completed` **or**
+  `verified`; clearance raw `verified`; overall averages only the modules
+  that contain data).
 - `src/lib/admin/compliance-helpers.ts` is a port of `ComplianceHelpers` +
   the Dart merge Builder **with documented corrections** (the Dart behavior
   hid requirements; no Firestore record is touched by this fix):
@@ -308,19 +309,35 @@ Requirements keep their `source:id` identity, so a training `start` row and
 an onboarding `start` row open different panels.
 
 Task actions live in `src/lib/admin/task-actions.ts` as **direct Firestore
-writes** (no new callables) and mirror the Dart payloads the employee app
-reads. Ownership fields (`employeeName`, and `title` for skip) are added when
-the admin surface passes them:
+transactional writes** (no new callables) and mirror the Dart payloads the
+employee app reads. Every action runs one transaction that reads the employee
+profile and the task BEFORE writing:
+
+- the profile must still be `role: "employee"`, owned by the signed-in admin
+  (`adminId === adminUid`), and `isActive !== false`;
+- `expectedRevision` — a canonical fingerprint of the **full** task document
+  captured when the reviewer opened the confirmation — must equal the
+  transaction's current document. A deletion, a replacement upload that
+  leaves the status `"submitted"`, another admin's decision, or any other
+  payload change returns `not-found` / `conflict` and writes nothing;
+- the current status must permit the requested transition for that source;
+- the write is field-level, so submissions, forms, signatures, attachments
+  and unrelated fields are preserved.
+
+Firestore retries contended transactions against fresh reads; the callback
+re-runs with the SAME expected revision, so a newer submission is never
+auto-approved.
 
 | Action | Source | Write |
 | --- | --- | --- |
-| Accept | onboarding | `setDoc(merge)`: `verified`, `isCompleted: true`, `updatedAt`, `completedAt`, `employeeName` |
-| Accept | training | `updateDoc`: `verified`, `updatedAt` (Dart does **not** stamp `completedAt` here — kept verbatim) |
-| Accept | clearance | `updateDoc`: `verified`, `verifiedAt`, `updatedAt` |
-| Reject | onboarding | `setDoc(merge)`: `rejected`, `isCompleted: false`, `updatedAt`, `rejectionReason`, `employeeName` |
-| Reject | training / clearance | `updateDoc`: `actionRequired`, `updatedAt`, `rejectionReason` |
-| Skip / unskip | onboarding | `setDoc(merge)`: `noActionRequired` / `notStarted`, `isCompleted: false`, `updatedAt`, `employeeName`, `title` |
-| Blank form URL | I-9 / W-9 onboarding | `updateDoc`: **only** `blankFormLink`, `updatedAt` |
+| Accept | onboarding | `update`: `verified`, `isCompleted: true`, `updatedAt`, `completedAt`, `employeeName` (profile name) |
+| Accept | training | `update`: `verified`, `updatedAt` (Dart does **not** stamp `completedAt` here — kept verbatim) |
+| Accept | clearance | `update`: `verified`, `verifiedAt`, `updatedAt` |
+| Reject | onboarding | `update`: `rejected`, `isCompleted: false`, `updatedAt`, trimmed `rejectionReason`, `employeeName` |
+| Reject | training / clearance | `update`: `actionRequired`, `updatedAt`, trimmed `rejectionReason` |
+| Skip / unskip | onboarding | `update`: `noActionRequired` / `notStarted`, `isCompleted: false`, `updatedAt`, `employeeName`; never rewrites `title` or the submission |
+| Skip a missing canonical template row | onboarding | `set`: the complete `onboardingTaskFields` template + ownership metadata, then `noActionRequired`, `isCompleted: false`, `updatedAt` — only when the reviewed revision was `null` and the id is in `DEFAULT_ONBOARDING_TASKS` |
+| Blank form URL | I-9 / W-9 onboarding | `update`: **only** `blankFormLink`, `updatedAt` (existing document, edited revision) |
 
 Documented corrections (no Firestore data is repaired by the panel):
 
@@ -331,34 +348,65 @@ Documented corrections (no Firestore data is repaired by the panel):
 2. **Blank-form links are non-destructive.** Flutter re-sent the task status
    and `isCompleted: false`, which un-completed verified I-9/W-9 tasks; it
    also used `setDoc`, which could recreate a deleted task. The web panel
-   writes only `blankFormLink + updatedAt`, requires an `http(s)` URL, and is
-   restricted to the two tax tasks.
+   writes only `blankFormLink + updatedAt`, requires an `http(s)` URL, is
+   restricted to the two tax tasks, and conflicts if the task changed while
+   the admin was typing.
 3. **No stale approvals.** Every review control is disabled while the
-   owning module holds retained (stale) data. Approving from a snapshot that
-   may be minutes old can double-review an already-decided task; the panel
-   shows an explicit "live data could not be refreshed" note instead of
-   failing silently. Retained rows stay readable.
-4. **Split-field tasks keep Flutter's hidden approve/reject** (they are
+   owning module holds retained (stale) data or the employee is inactive.
+   Open confirmations capture the task key, full-document revision, status,
+   module availability, admin uid, employee id and activation; ANY change
+   invalidates the open dialog (the action button is disabled and the handler
+   refuses), so the reviewer must close it and review the latest submission.
+   This covers same-status replacement uploads, competing admin decisions,
+   ownership changes and deletions.
+4. **Skip creation is intentional and bounded.** A deleted task is never
+   recreated by approve/reject/blank-link (`update` only). Skip may create a
+   row only when the reviewer saw a missing CANONICAL template row
+   (`expectedRevision === null`); a row deleted after the confirmation opened
+   carries a non-null revision and is refused. Created rows carry the full
+   template + `adminId` / `employeeId` / `employeeName` metadata.
+5. **Training progress recognizes both terminal statuses.** The admin
+   approval writes `"verified"` (Flutter `TrainingDTO` semantics), while the
+   inherited progress formula counted only `"completed"`, so an approved
+   training showed as done in the checklist but did not move the progress
+   bars. The shared calculator now counts `"completed"` **and** `"verified"`
+   consistently for Dashboard, Directory, Detail and checklist categories.
+   No stored status value is renamed or migrated; rejections write
+   `"actionRequired"` and immediately leave the completed count.
+6. **Certificate arrays are first-class.** Training attachments use the Dart
+   `TrainingDTO` precedence: a non-null `certificateUrls` array wins (even
+   when empty), otherwise the legacy `certificateUrl` is used. Valid entries
+   are de-duplicated in first-seen order; malformed entries are dropped
+   instead of throwing. The review panel renders EVERY attachment with its
+   own open + download link and an inline image preview, so array-only
+   submissions are not reported as "No submission data yet." Blank-link
+   documents still render the single onboarding `fileUrl`.
+7. **Split-field tasks keep Flutter's hidden approve/reject** (they are
    counter-signed through their form) but show a read-only employee +
    administrative submission summary so reviewers can inspect what was
    submitted. `AdminAcknowledgeFormView` renders legal documents verbatim
    from `src/lib/admin/legal-content.ts`.
-5. **No fabricated admin upload / audit PDF yet.** Phase 5 owns uploads and
+8. **No fabricated admin upload / audit PDF yet.** Phase 5 owns uploads and
    server-side PDFs. For now the panel links directly to uploaded originals
    and renders the submitted form data; it never claims a document download
    that does not exist.
 
-The task timeline, skip control, blank-form card, file/signature previews,
-form data, administrative review (including the rejection reason) and
-activity footer are all covered by tests in
-`src/app/dashboard/directory/__tests__/task-detail-panel.test.tsx` and
-`admin-form-views.test.tsx`; the payloads are pinned in
-`src/lib/admin/__tests__/task-actions.test.ts`.
+The dialog-invalidation behavior, stale/inactive gating, task timeline, skip
+control, blank-form card, file/signature previews, form data and
+administrative review are covered in
+`src/app/dashboard/directory/__tests__/task-detail-panel.test.tsx`; array /
+legacy / duplicate / empty / malformed certificates go through the REAL
+mapper → compliance model → panel in
+`__tests__/training-certificates.test.tsx`; the transactional payloads,
+retries, deletions, ownership/activation and creation rules are pinned in
+`src/lib/admin/__tests__/task-actions.test.ts`; approval → snapshot →
+progress is end-to-end in `__tests__/task-review-progress.test.ts`.
 
 **Production prerequisite:** these are client writes, so Firestore security
-rules are the only server-side guard. Confirm the console-managed rules only
-allow an admin to write tasks for employees they own (`adminId`) before
-using this panel against real data.
+rules remain the ONLY server-side authority. The client checks above are
+defense in depth, not a substitute. Confirm the console-managed rules allow
+only an admin to read/write tasks for employees they own (`adminId`) and deny
+employee self-approval before using this panel against real data.
 
 
 

@@ -55,6 +55,7 @@ function taskDoc(overrides: Partial<EmployeeTaskDoc> & { id: string }): Employee
     signedAt: null,
     hasFormData: false,
     hasAdminFormData: false,
+    revision: "rev-1",
     ...overrides,
   }
 }
@@ -66,10 +67,12 @@ function trainingDoc(overrides: Partial<EmployeeTrainingDoc> & { id: string }): 
     durationText: null,
     status: "notStarted",
     certificateUrl: null,
+    certificateUrls: [],
     completedAt: null,
     dueDate: null,
     assignedAt: null,
     rejectionReason: null,
+    revision: "rev-1",
     ...overrides,
   }
 }
@@ -84,6 +87,7 @@ function clearanceDoc(overrides: Partial<EmployeeClearanceDoc> & { id: string })
     dueDate: null,
     submittedAt: null,
     verifiedAt: null,
+    revision: "rev-1",
     ...overrides,
   }
 }
@@ -470,9 +474,11 @@ describe("subtaskKey — identity (correction 4)", () => {
       actionType: null,
       isCompleted: false,
       fileUrl: null,
+      fileUrls: [],
       updatedAt: null,
       completedAt: null,
       rejectionReason: null,
+      revision: null,
     }
     expect(subtaskKey({ ...base, id: "start", taskSource: "onboarding" })).toBe("onboarding:start")
     expect(subtaskKey({ ...base, id: "start", taskSource: "training" })).toBe("training:start")

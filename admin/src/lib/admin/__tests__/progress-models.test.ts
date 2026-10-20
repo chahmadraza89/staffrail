@@ -3,7 +3,9 @@
  * streamAdminEmployeesProgress semantics that Dashboard, Directory and the
  * Detail page all reuse through computeModuleProgress:
  *   - onboarding counts the isCompleted FLAG over non-noActionRequired tasks
- *   - training counts raw status === "completed" over all docs
+ *   - training counts raw status "completed" OR "verified" over all docs
+ *     (admin approval writes "verified"; the shared checklist maps both to
+ *     completed, so progress must agree)
  *   - clearance counts raw status === "verified" over all docs
  *   - overall is the average of ONLY the modules that contain data
  */
@@ -37,22 +39,22 @@ describe("computeModuleProgress", () => {
     expect(progress.overall).toBeCloseTo(2 / 3)
   })
 
-  it("training uses the raw 'completed' status and clearance the raw 'verified' status", () => {
+  it("training counts BOTH terminal statuses and clearance counts 'verified'", () => {
     const progress = computeModuleProgress({
       tasks: [],
       trainings: [
         { status: "completed" },
         { status: "underReview" },
-        { status: "verified" }, // NOT counted for trainings (mapping is external)
+        { status: "verified" }, // admin approval — terminal, counted
       ],
       clearances: [
         { status: "verified" },
         { status: "pending" },
       ],
     })
-    expect(progress.training).toBeCloseTo(1 / 3)
+    expect(progress.training).toBeCloseTo(2 / 3)
     expect(progress.clearance).toBeCloseTo(1 / 2)
-    expect(progress.overall).toBeCloseTo((1 / 3 + 1 / 2) / 2)
+    expect(progress.overall).toBeCloseTo((2 / 3 + 1 / 2) / 2)
   })
 
   it("overall averages ONLY modules that contain data", () => {

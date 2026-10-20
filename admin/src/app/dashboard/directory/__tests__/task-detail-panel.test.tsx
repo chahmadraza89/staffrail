@@ -30,9 +30,11 @@ function makeTask(overrides: Partial<DetailSubTask> = {}): DetailSubTask {
     actionType: "acknowledgeSign",
     isCompleted: false,
     fileUrl: null,
+    fileUrls: [],
     updatedAt: new Date(2026, 9, 12),
     completedAt: null,
     rejectionReason: null,
+    revision: "rev-1",
     ...overrides,
   }
 }
@@ -58,28 +60,44 @@ function makeDoc(overrides: Partial<EmployeeTaskDoc> = {}): EmployeeTaskDoc {
     signedAt: null,
     hasFormData: false,
     hasAdminFormData: false,
+    revision: "rev-1",
     ...overrides,
   }
 }
 
-function renderPanel({
-  task = makeTask(),
-  doc = null,
-  actionsEnabled = true,
-}: {
+interface PanelOptions {
   task?: DetailSubTask
   doc?: EmployeeTaskDoc | null
   actionsEnabled?: boolean
-} = {}) {
-  return render(
+  employeeActive?: boolean
+  adminUid?: string
+  employeeAdminId?: string | null
+}
+
+function panelElement({
+  task = makeTask(),
+  doc = null,
+  actionsEnabled = true,
+  employeeActive = true,
+  adminUid = "adm-1",
+  employeeAdminId = "adm-1",
+}: PanelOptions = {}) {
+  return (
     <TaskDetailPanel
       task={task}
       employeeId="emp-1"
       employeeName="Jane Doe"
+      adminUid={adminUid}
+      employeeAdminId={employeeAdminId}
+      employeeActive={employeeActive}
       taskDoc={doc}
       actionsEnabled={actionsEnabled}
-    />,
+    />
   )
+}
+
+function renderPanel(options: PanelOptions = {}) {
+  return render(panelElement(options))
 }
 
 beforeEach(() => {
@@ -106,7 +124,11 @@ describe("TaskDetailPanel — header, previews, timeline", () => {
 
   it("renders typed signatures and file previews (image vs document)", () => {
     const { unmount } = renderPanel({
-      task: makeTask({ actionType: "upload", fileUrl: "https://x/photo.JPG" }),
+      task: makeTask({
+        actionType: "upload",
+        fileUrl: "https://x/photo.JPG",
+        fileUrls: ["https://x/photo.JPG"],
+      }),
       doc: makeDoc({ signatureUrl: "typed:Jane Doe" }),
     })
     expect(screen.getByTestId("task-file-image").getAttribute("src")).toBe("https://x/photo.JPG")
@@ -114,7 +136,11 @@ describe("TaskDetailPanel — header, previews, timeline", () => {
     unmount()
 
     renderPanel({
-      task: makeTask({ actionType: "upload", fileUrl: "https://x/scan_1777_Resume.pdf" }),
+      task: makeTask({
+        actionType: "upload",
+        fileUrl: "https://x/scan_1777_Resume.pdf",
+        fileUrls: ["https://x/scan_1777_Resume.pdf"],
+      }),
     })
     expect(screen.queryByTestId("task-file-image")).toBeNull()
     expect(screen.getByTestId("task-file-preview").textContent).toContain("scan_1777_Resume.pdf")
@@ -135,7 +161,7 @@ describe("TaskDetailPanel — header, previews, timeline", () => {
 
 describe("TaskDetailPanel — accept / reject", () => {
   it("verifies through the confirmation dialog with employee ownership", async () => {
-    renderPanel()
+    renderPanel({ doc: makeDoc() })
     fireEvent.click(screen.getByTestId("task-verify"))
     expect(screen.getByTestId("verify-dialog").textContent).toContain("Verify Task?")
     fireEvent.click(screen.getByTestId("confirm-verify"))
@@ -144,6 +170,8 @@ describe("TaskDetailPanel — accept / reject", () => {
         employeeId: "emp-1",
         taskId: "onboarding_acknowledgment_form",
         taskSource: "onboarding",
+        adminUid: "adm-1",
+        expectedRevision: "rev-1",
         employeeName: "Jane Doe",
       }),
     )
@@ -159,7 +187,7 @@ describe("TaskDetailPanel — accept / reject", () => {
   })
 
   it("requires a trimmed rejection reason and only then calls rejectTask", async () => {
-    renderPanel()
+    renderPanel({ doc: makeDoc() })
     fireEvent.click(screen.getByTestId("task-reject"))
     const confirm = screen.getByTestId("confirm-reject")
     expect(confirm).toBeDisabled()
@@ -175,6 +203,8 @@ describe("TaskDetailPanel — accept / reject", () => {
         employeeId: "emp-1",
         taskId: "onboarding_acknowledgment_form",
         taskSource: "onboarding",
+        adminUid: "adm-1",
+        expectedRevision: "rev-1",
         employeeName: "Jane Doe",
         reason: "signature missing",
       }),
@@ -190,7 +220,7 @@ describe("TaskDetailPanel — accept / reject", () => {
 
   it("shows action errors without closing the dialog", async () => {
     vi.mocked(taskActions.acceptTask).mockRejectedValueOnce(new Error("offline"))
-    renderPanel()
+    renderPanel({ doc: makeDoc() })
     fireEvent.click(screen.getByTestId("task-verify"))
     fireEvent.click(screen.getByTestId("confirm-verify"))
     await waitFor(() => expect(screen.getByTestId("task-action-error")).toBeTruthy())
@@ -209,8 +239,9 @@ describe("TaskDetailPanel — skip / blank form link", () => {
         employeeId: "emp-1",
         taskId: "onboarding_acknowledgment_form",
         taskSource: "onboarding",
+        adminUid: "adm-1",
+        expectedRevision: null,
         employeeName: "Jane Doe",
-        taskTitle: "Onboarding Acknowledgment form",
         skip: true,
       }),
     )
@@ -260,6 +291,8 @@ describe("TaskDetailPanel — skip / blank form link", () => {
         employeeId: "emp-1",
         taskId: "tax_documents_i_9",
         taskSource: "onboarding",
+        adminUid: "adm-1",
+        expectedRevision: "rev-1",
         newLink: "https://example.test/i9.pdf",
       }),
     )
@@ -304,10 +337,219 @@ describe("TaskDetailPanel — skip / blank form link", () => {
   })
 })
 
+describe("TaskDetailPanel — open confirmations are invalidated", () => {
+  it("disables an open verify confirmation when the owning module goes stale", () => {
+    const view = renderPanel({ doc: makeDoc() })
+    fireEvent.click(screen.getByTestId("task-verify"))
+    const confirm = screen.getByTestId("confirm-verify")
+    expect(confirm).not.toBeDisabled()
+
+    view.rerender(panelElement({ doc: makeDoc(), actionsEnabled: false }))
+
+    expect(screen.getByTestId("verify-stale-note")).toBeTruthy()
+    expect(screen.getByTestId("task-actions-unavailable")).toBeTruthy()
+    expect(confirm).toBeDisabled()
+    fireEvent.click(confirm)
+    expect(taskActions.acceptTask).not.toHaveBeenCalled()
+  })
+
+  it("rejects acting on a replacement upload until the reviewer reopens the confirmation", async () => {
+    const view = renderPanel({ doc: makeDoc() })
+    fireEvent.click(screen.getByTestId("task-verify"))
+    const confirm = screen.getByTestId("confirm-verify")
+
+    // Same status ("submitted") but a new file → a different submission.
+    view.rerender(
+      panelElement({
+        doc: makeDoc({ revision: "rev-2", fileUrl: "https://x/replacement.pdf" }),
+      }),
+    )
+
+    expect(screen.getByTestId("verify-stale-note")).toBeTruthy()
+    expect(confirm).toBeDisabled()
+    fireEvent.click(confirm)
+    expect(taskActions.acceptTask).not.toHaveBeenCalled()
+
+    // A fresh confirmation captures the NEW revision.
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
+    fireEvent.click(screen.getByTestId("task-verify"))
+    fireEvent.click(screen.getByTestId("confirm-verify"))
+    await waitFor(() =>
+      expect(taskActions.acceptTask).toHaveBeenCalledWith(
+        expect.objectContaining({ expectedRevision: "rev-2" }),
+      ),
+    )
+  })
+
+  it("invalidates verify when the reviewer's ownership changes", () => {
+    const view = renderPanel({ doc: makeDoc() })
+    fireEvent.click(screen.getByTestId("task-verify"))
+    const confirm = screen.getByTestId("confirm-verify")
+
+    view.rerender(panelElement({ doc: makeDoc(), adminUid: "adm-2" }))
+
+    expect(screen.getByTestId("verify-stale-note")).toBeTruthy()
+    expect(confirm).toBeDisabled()
+    fireEvent.click(confirm)
+    expect(taskActions.acceptTask).not.toHaveBeenCalled()
+  })
+
+  it("invalidates verify when the employee profile's owner changes", () => {
+    const view = renderPanel({ doc: makeDoc() })
+    fireEvent.click(screen.getByTestId("task-verify"))
+    const confirm = screen.getByTestId("confirm-verify")
+
+    view.rerender(panelElement({ doc: makeDoc(), employeeAdminId: "other-admin" }))
+
+    expect(screen.getByTestId("verify-stale-note")).toBeTruthy()
+    expect(confirm).toBeDisabled()
+    fireEvent.click(confirm)
+    expect(taskActions.acceptTask).not.toHaveBeenCalled()
+  })
+
+  it("invalidates verify when the employee is deactivated", () => {
+    const view = renderPanel({ doc: makeDoc() })
+    fireEvent.click(screen.getByTestId("task-verify"))
+    const confirm = screen.getByTestId("confirm-verify")
+
+    view.rerender(panelElement({ doc: makeDoc(), employeeActive: false }))
+
+    expect(screen.getByTestId("task-actions-inactive")).toBeTruthy()
+    expect(screen.getByTestId("verify-stale-note")).toBeTruthy()
+    expect(confirm).toBeDisabled()
+    fireEvent.click(confirm)
+    expect(taskActions.acceptTask).not.toHaveBeenCalled()
+  })
+
+  it("invalidates verify when the status is no longer reviewable", () => {
+    const view = renderPanel({ doc: makeDoc() })
+    fireEvent.click(screen.getByTestId("task-verify"))
+    const confirm = screen.getByTestId("confirm-verify")
+
+    view.rerender(
+      panelElement({
+        task: makeTask({ status: "verified", isCompleted: true }),
+        doc: makeDoc(),
+      }),
+    )
+
+    expect(screen.getByTestId("verify-stale-note")).toBeTruthy()
+    expect(confirm).toBeDisabled()
+    fireEvent.click(confirm)
+    expect(taskActions.acceptTask).not.toHaveBeenCalled()
+  })
+
+  it("invalidates an open rejection when the status changes, preserving reason validation", async () => {
+    const view = renderPanel({ doc: makeDoc() })
+    fireEvent.click(screen.getByTestId("task-reject"))
+    fireEvent.change(screen.getByTestId("reject-reason"), {
+      target: { value: "needs a clearer scan" },
+    })
+    const confirm = screen.getByTestId("confirm-reject")
+    expect(confirm).not.toBeDisabled()
+
+    view.rerender(
+      panelElement({
+        task: makeTask({ status: "notStarted" }),
+        doc: makeDoc(),
+      }),
+    )
+
+    expect(screen.getByTestId("reject-stale-note")).toBeTruthy()
+    expect(confirm).toBeDisabled()
+    fireEvent.click(confirm)
+    expect(taskActions.rejectTask).not.toHaveBeenCalled()
+
+    // Close → restore a reviewable status → reopen: the typed reason is
+    // still required and still enforced.
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
+    view.rerender(panelElement({ doc: makeDoc() }))
+    fireEvent.click(screen.getByTestId("task-reject"))
+    const reopened = screen.getByTestId("confirm-reject")
+    expect(reopened).not.toBeDisabled()
+    fireEvent.click(reopened)
+    await waitFor(() =>
+      expect(taskActions.rejectTask).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: "needs a clearer scan" }),
+      ),
+    )
+  })
+
+  it("invalidates an open skip confirmation when the task changes", () => {
+    const view = renderPanel()
+    fireEvent.click(screen.getByTestId("task-skip-switch"))
+    const confirm = screen.getByTestId("confirm-skip")
+    expect(confirm).not.toBeDisabled()
+
+    view.rerender(panelElement({ task: makeTask({ status: "noActionRequired" }) }))
+
+    expect(screen.getByTestId("skip-stale-note")).toBeTruthy()
+    expect(confirm).toBeDisabled()
+    fireEvent.click(confirm)
+    expect(taskActions.skipTask).not.toHaveBeenCalled()
+  })
+
+  it("captures the blank-form revision when editing starts", async () => {
+    const view = renderPanel({
+      task: makeTask({
+        id: "tax_documents_i_9",
+        title: "Tax Documents (I-9)",
+        actionType: "splitField",
+      }),
+      doc: makeDoc({ id: "tax_documents_i_9" }),
+    })
+    fireEvent.change(screen.getByTestId("blank-form-link-input"), {
+      target: { value: "https://example.test/i9.pdf" },
+    })
+
+    view.rerender(
+      panelElement({
+        task: makeTask({
+          id: "tax_documents_i_9",
+          title: "Tax Documents (I-9)",
+          actionType: "splitField",
+        }),
+        doc: makeDoc({ id: "tax_documents_i_9", revision: "rev-2" }),
+      }),
+    )
+
+    fireEvent.click(screen.getByTestId("blank-form-link-save"))
+    await waitFor(() =>
+      expect(taskActions.updateBlankFormLink).toHaveBeenCalledWith(
+        expect.objectContaining({ expectedRevision: "rev-1" }),
+      ),
+    )
+  })
+})
+
 describe("TaskDetailPanel — read states and module safety", () => {
   it("disables ALL review controls when the owning module is stale", () => {
     renderPanel({ actionsEnabled: false })
     expect(screen.getByTestId("task-actions-unavailable")).toBeTruthy()
+    expect(screen.getByTestId("task-verify")).toBeDisabled()
+    expect(screen.getByTestId("task-reject")).toBeDisabled()
+    expect(screen.getByTestId("task-skip-switch")).toBeDisabled()
+    fireEvent.click(screen.getByTestId("task-skip-switch"))
+    expect(screen.queryByTestId("skip-dialog")).toBeNull()
+  })
+
+  it("disables ALL review controls for an inactive employee", () => {
+    renderPanel({ actionsEnabled: true, employeeActive: false, doc: makeDoc() })
+    expect(screen.getByTestId("task-actions-inactive")).toBeTruthy()
+    expect(screen.getByTestId("task-verify")).toBeDisabled()
+    expect(screen.getByTestId("task-reject")).toBeDisabled()
+    expect(screen.getByTestId("task-skip-switch")).toBeDisabled()
+    fireEvent.click(screen.getByTestId("task-skip-switch"))
+    expect(screen.queryByTestId("skip-dialog")).toBeNull()
+  })
+
+  it("disables ALL review controls when the employee's owner no longer matches the session", () => {
+    renderPanel({
+      actionsEnabled: true,
+      employeeAdminId: "other-admin",
+      doc: makeDoc(),
+    })
+    expect(screen.getByTestId("task-actions-not-owner")).toBeTruthy()
     expect(screen.getByTestId("task-verify")).toBeDisabled()
     expect(screen.getByTestId("task-reject")).toBeDisabled()
     expect(screen.getByTestId("task-skip-switch")).toBeDisabled()
@@ -353,7 +595,11 @@ describe("TaskDetailPanel — document dispatch / split fields", () => {
 
   it("shows raw form data and the administrative review payload", () => {
     renderPanel({
-      task: makeTask({ actionType: "upload", fileUrl: "https://x/file.pdf" }),
+      task: makeTask({
+        actionType: "upload",
+        fileUrl: "https://x/file.pdf",
+        fileUrls: ["https://x/file.pdf"],
+      }),
       doc: makeDoc({
         actionType: "upload",
         formData: { fullName: "Jane Doe", customField: "value" },
@@ -380,6 +626,7 @@ describe("TaskDetailPanel — document dispatch / split fields", () => {
         actionType: "upload",
         status: "submitted",
         fileUrl: "https://x/cert.pdf",
+        fileUrls: ["https://x/cert.pdf"],
       }),
     })
     expect(screen.getByTestId("task-download").getAttribute("href")).toBe("https://x/cert.pdf")

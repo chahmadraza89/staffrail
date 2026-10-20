@@ -8,7 +8,11 @@
  *   - onboarding: completed (`isCompleted` flag — NOT status-derived) over
  *     tasks whose status is not `noActionRequired`; a zero-total module
  *     contributes 0 and is excluded from the overall average.
- *   - training: raw status === "completed" over ALL training docs.
+ *   - training: raw status === "completed" OR "verified" over ALL training
+ *     docs. Both are terminal in the shared checklist mapping, and the admin
+ *     panel's approval writes "verified" (the employee app's DTO reports it
+ *     as completed). Counting only "completed" made an approved training
+ *     disappear from progress while the checklist showed it done.
  *   - clearance: raw status === "verified" over ALL clearance docs.
  *   - overall: the average of ONLY the modules that contain data.
  *
@@ -44,6 +48,17 @@ export interface ModuleProgress {
 
 export const NO_ACTION_REQUIRED_STATUS = "noActionRequired"
 
+/**
+ * Stored training statuses that mean "finished". `verified` is what the admin
+ * review action writes (and what the employee DTO maps to completed);
+ * `completed` is what the employee app writes. Both count as done.
+ */
+export const COMPLETED_TRAINING_STATUSES = ["completed", "verified"] as const
+
+export function isTrainingCompleted(status: unknown): boolean {
+  return (COMPLETED_TRAINING_STATUSES as readonly unknown[]).includes(status)
+}
+
 export function computeModuleProgress(items: ProgressModuleItems): ModuleProgress {
   // ── onboarding tasks (noActionRequired excluded, mirrors Flutter) ──
   const relevantTasks = items.tasks.filter(
@@ -55,8 +70,8 @@ export function computeModuleProgress(items: ProgressModuleItems): ModuleProgres
 
   // ── trainings ──
   const totalTrainings = items.trainings.length
-  const completedTrainings = items.trainings.filter(
-    (training) => training.status === "completed",
+  const completedTrainings = items.trainings.filter((training) =>
+    isTrainingCompleted(training.status),
   ).length
   const trainingPct = totalTrainings === 0 ? 0 : completedTrainings / totalTrainings
 

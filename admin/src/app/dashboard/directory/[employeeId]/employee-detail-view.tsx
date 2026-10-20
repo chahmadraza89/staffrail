@@ -318,6 +318,9 @@ export function EmployeeDetailView({
             employeeId={employeeId}
             onboardingTasks={detail.data.tasks}
             employeeName={stage.employee.name}
+            adminUid={adminUid}
+            employeeAdminId={stage.employee.adminId}
+            employeeActive={stage.employee.isActive}
             actionsEnabled={{
               onboarding: moduleUi.onboardingTasks === "ready",
               training: moduleUi.trainings === "ready",
@@ -604,6 +607,9 @@ function ComplianceSection({
   retry,
   employeeId,
   employeeName,
+  adminUid,
+  employeeAdminId,
+  employeeActive,
   onboardingTasks,
   actionsEnabled,
 }: {
@@ -619,6 +625,9 @@ function ComplianceSection({
   retry: () => void
   employeeId: string
   employeeName: string
+  adminUid: string
+  employeeAdminId: string | null
+  employeeActive: boolean
   onboardingTasks: EmployeeTaskDoc[]
   actionsEnabled: Record<"onboarding" | "training" | "clearance", boolean>
 }) {
@@ -681,6 +690,9 @@ function ComplianceSection({
                 staleCategory={staleCategory}
                 employeeId={employeeId}
                 employeeName={employeeName}
+                adminUid={adminUid}
+                employeeAdminId={employeeAdminId}
+                employeeActive={employeeActive}
                 onboardingTasks={onboardingTasks}
                 actionsEnabled={actionsEnabled}
               />

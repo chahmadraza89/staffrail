@@ -118,6 +118,12 @@ export interface TaskManagerSectionProps {
   staleCategory: (category: ComplianceCategory) => boolean
   employeeId: string
   employeeName: string
+  /** Signed-in admin uid from the established session context. */
+  adminUid: string
+  /** Owner recorded on the employee profile (ownership-change detection). */
+  employeeAdminId: string | null
+  /** False for deactivated employees — review writes are blocked. */
+  employeeActive: boolean
   /** Live onboarding docs (raw form data) for the selected row. */
   onboardingTasks: EmployeeTaskDoc[]
   /** True only while the owning module's read is live (not stale/pending). */
@@ -130,6 +136,9 @@ export function TaskManagerSection({
   staleCategory,
   employeeId,
   employeeName,
+  adminUid,
+  employeeAdminId,
+  employeeActive,
   onboardingTasks,
   actionsEnabled,
 }: TaskManagerSectionProps) {
@@ -157,6 +166,9 @@ export function TaskManagerSection({
       task={selected}
       employeeId={employeeId}
       employeeName={employeeName}
+      adminUid={adminUid}
+      employeeAdminId={employeeAdminId}
+      employeeActive={employeeActive}
       taskDoc={selectedDoc}
       actionsEnabled={actionsEnabled[selected.taskSource]}
       onClose={clearSelection}
@@ -394,15 +406,54 @@ export interface TaskDetailPanelProps {
   task: DetailSubTask
   employeeId: string
   employeeName: string
+  adminUid: string
+  /** Owner recorded on the live employee profile. */
+  employeeAdminId: string | null
+  employeeActive: boolean
   taskDoc: EmployeeTaskDoc | null
   actionsEnabled: boolean
   onClose?: () => void
+}
+
+type ReviewDialog = "verify" | "reject" | "skip"
+
+/**
+ * Everything a confirmation depends on. The dialog stores the snapshot taken
+ * when it opened; any change (a replacement upload, another admin's decision,
+ * module failure, ownership/activation change, or a different task) makes the
+ * open confirmation invalid and disables its action.
+ */
+interface ReviewSnapshot {
+  taskKey: string
+  revision: string | null
+  status: DetailSubTask["status"]
+  actionsEnabled: boolean
+  employeeActive: boolean
+  adminUid: string
+  employeeAdminId: string | null
+  employeeId: string
+}
+
+function sameReviewSnapshot(a: ReviewSnapshot, b: ReviewSnapshot): boolean {
+  return (
+    a.taskKey === b.taskKey &&
+    a.revision === b.revision &&
+    a.status === b.status &&
+    a.actionsEnabled === b.actionsEnabled &&
+    a.employeeActive === b.employeeActive &&
+    a.adminUid === b.adminUid &&
+    a.employeeAdminId === b.employeeAdminId &&
+    a.employeeId === b.employeeId
+  )
 }
 
 export function TaskDetailPanel({
   task,
   employeeId,
   employeeName,
+  adminUid,
+  employeeAdminId,
+  employeeActive,
   taskDoc,
   actionsEnabled,
   onClose,
@@ -410,11 +461,18 @@ export function TaskDetailPanel({
   const [busy, setBusy] = useState<"accept" | "reject" | "skip" | "link" | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
-  const [verifyOpen, setVerifyOpen] = useState(false)
-  const [rejectOpen, setRejectOpen] = useState(false)
-  const [skipOpen, setSkipOpen] = useState(false)
+  const [dialog, setDialog] = useState<ReviewDialog | null>(null)
+  const [reviewed, setReviewed] = useState<ReviewSnapshot | null>(null)
   const [rejectReason, setRejectReason] = useState("")
   const [linkDraft, setLinkDraft] = useState<string | null>(null)
+  /**
+   * Revision captured when blank-link editing began. If the document changes
+   * while the admin types, the save conflicts instead of applying the link to
+   * a submission the admin never saw.
+   */
+  const [linkBaseRevision, setLinkBaseRevision] = useState<{
+    revision: string | null
+  } | null>(null)
   /** Stored link wins over the Dart default (the doc is the source of truth). */
   const storedLink = taskDoc?.blankFormLink ?? defaultLinkFor(task.id)
 
@@ -422,8 +480,75 @@ export function TaskDetailPanel({
   const isSplitField = task.actionType === "splitField"
   const canAccept = canAcceptTask(task.status)
   const canReject = canRejectTask(task.status)
-  const blocked = !actionsEnabled || busy !== null
+  const ownershipValid = employeeAdminId !== null && employeeAdminId === adminUid
+  const blocked = !actionsEnabled || !employeeActive || !ownershipValid || busy !== null
   const skipped = task.status === "noActionRequired"
+  const revision =
+    task.taskSource === "onboarding" ? (taskDoc?.revision ?? null) : task.revision
+
+  const snapshotNow = (): ReviewSnapshot => ({
+    taskKey: subtaskKey(task),
+    revision,
+    status: task.status,
+    actionsEnabled,
+    employeeActive,
+    adminUid,
+    employeeAdminId,
+    employeeId,
+  })
+  const currentReview = snapshotNow()
+  const reviewStale =
+    dialog !== null && reviewed !== null && !sameReviewSnapshot(reviewed, currentReview)
+
+  const openReview = (kind: ReviewDialog) => {
+    setError(null)
+    setReviewed(snapshotNow())
+    setDialog(kind)
+  }
+  const closeReview = () => {
+    setDialog(null)
+    setReviewed(null)
+  }
+  /**
+   * Re-checks EVERYTHING at the moment the action runs. This is deliberately
+   * duplicated with the button's disabled state: a confirmation opened while
+   * live must not execute after the module/task/ownership state changed.
+   */
+  const currentReviewFor = (kind: ReviewDialog): ReviewSnapshot | null => {
+    if (busy !== null) {
+      setError("Another review action is still running. Wait for it to finish.")
+      return null
+    }
+    if (!actionsEnabled) {
+      setError(
+        "This task's live data could not be refreshed. Review actions are disabled until the stream reconnects.",
+      )
+      return null
+    }
+    if (!ownershipValid) {
+      setError(
+        "Ownership of this employee changed. Refresh the page before reviewing requirements.",
+      )
+      return null
+    }
+    if (!employeeActive) {
+      setError(
+        "This employee is inactive. Reactivate the employee before reviewing requirements.",
+      )
+      return null
+    }
+    if (reviewed === null || !sameReviewSnapshot(reviewed, snapshotNow())) {
+      setError(
+        "This submission changed since you opened the confirmation. Review the latest version before acting.",
+      )
+      return null
+    }
+    if (dialog !== kind) {
+      setError("This confirmation is no longer open. Reopen it to review the latest submission.")
+      return null
+    }
+    return reviewed
+  }
 
   const formData = taskDoc?.formData ?? null
   const adminFormData = taskDoc?.adminFormData ?? null
@@ -447,6 +572,14 @@ export function TaskDetailPanel({
   }
 
   const handleAccept = async () => {
+    const review = currentReviewFor("verify")
+    if (review === null) {
+      return
+    }
+    if (!canAcceptTask(review.status)) {
+      setError("This requirement can no longer be verified. Refresh and review its current status.")
+      return
+    }
     setBusy("accept")
     setError(null)
     setNotice(null)
@@ -455,9 +588,11 @@ export function TaskDetailPanel({
         employeeId,
         taskId: task.id,
         taskSource: task.taskSource,
+        adminUid: review.adminUid,
+        expectedRevision: review.revision,
         employeeName,
       })
-      setVerifyOpen(false)
+      closeReview()
       setNotice("Task verified and approved.")
     } catch (caught) {
       fail(caught, "Failed to verify task.")
@@ -471,6 +606,14 @@ export function TaskDetailPanel({
     if (reason.length === 0) {
       return
     }
+    const review = currentReviewFor("reject")
+    if (review === null) {
+      return
+    }
+    if (!canRejectTask(review.status)) {
+      setError("This requirement can no longer be rejected. Refresh and review its current status.")
+      return
+    }
     setBusy("reject")
     setError(null)
     setNotice(null)
@@ -479,10 +622,12 @@ export function TaskDetailPanel({
         employeeId,
         taskId: task.id,
         taskSource: task.taskSource,
+        adminUid: review.adminUid,
+        expectedRevision: review.revision,
         employeeName,
         reason,
       })
-      setRejectOpen(false)
+      closeReview()
       setRejectReason("")
       setNotice("Task rejected. The employee will see the reason.")
     } catch (caught) {
@@ -493,6 +638,11 @@ export function TaskDetailPanel({
   }
 
   const handleSkip = async () => {
+    const review = currentReviewFor("skip")
+    if (review === null) {
+      return
+    }
+    const skip = review.status !== "noActionRequired"
     setBusy("skip")
     setError(null)
     setNotice(null)
@@ -501,12 +651,13 @@ export function TaskDetailPanel({
         employeeId,
         taskId: task.id,
         taskSource: task.taskSource,
+        adminUid: review.adminUid,
+        expectedRevision: review.revision,
         employeeName,
-        taskTitle: task.title,
-        skip: !skipped,
+        skip,
       })
-      setSkipOpen(false)
-      setNotice(skipped ? "Requirement marked required again." : "Requirement skipped.")
+      closeReview()
+      setNotice(skip ? "Requirement skipped." : "Requirement marked required again.")
     } catch (caught) {
       fail(caught, "Failed to update task.")
     } finally {
@@ -515,6 +666,17 @@ export function TaskDetailPanel({
   }
 
   const handleSaveLink = async () => {
+    if (busy !== null) {
+      return
+    }
+    if (!actionsEnabled || !employeeActive) {
+      setError(
+        employeeActive
+          ? "This task's live data could not be refreshed. Saving is disabled until the stream reconnects."
+          : "This employee is inactive. Reactivate the employee before editing requirements.",
+      )
+      return
+    }
     const draft = (linkDraft ?? storedLink).trim()
     if (!/^https?:\/\/\S+$/i.test(draft)) {
       setError("Enter a valid http(s) URL.")
@@ -528,9 +690,12 @@ export function TaskDetailPanel({
         employeeId,
         taskId: task.id,
         taskSource: task.taskSource,
+        adminUid,
+        expectedRevision: (linkBaseRevision ?? { revision }).revision,
         newLink: draft,
       })
       setLinkDraft(draft)
+      setLinkBaseRevision(null)
       setNotice("Blank form link updated.")
     } catch (caught) {
       fail(caught, "Failed to save blank form link.")
@@ -558,7 +723,13 @@ export function TaskDetailPanel({
   const showBlankLink =
     isOnboarding && (BLANK_FORM_TASK_IDS as readonly string[]).includes(task.id)
   const linkValue = linkDraft ?? storedLink
-  const downloadAvailable = isDownloadAvailable(task)
+  const attachments = task.fileUrls
+  const primaryFile = attachments[0] ?? null
+  const downloadAvailable = isDownloadAvailable({
+    actionType: task.actionType,
+    fileUrl: primaryFile,
+    status: task.status,
+  })
 
   return (
     <article className="bg-card flex max-h-[90vh] flex-col overflow-hidden rounded-xl border shadow-sm xl:max-h-[calc(100vh-3rem)]">
@@ -605,6 +776,27 @@ export function TaskDetailPanel({
             disabled until the stream reconnects and the current status is known.
           </p>
         ) : null}
+        {!employeeActive ? (
+          <p
+            role="status"
+            data-testid="task-actions-inactive"
+            className="flex items-start gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600"
+          >
+            <AlertCircle aria-hidden className="mt-0.5 size-3.5 shrink-0" />
+            This employee is inactive. Review actions are disabled until the employee is
+            reactivated.
+          </p>
+        ) : null}
+        {!ownershipValid ? (
+          <p
+            role="status"
+            data-testid="task-actions-not-owner"
+            className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+          >
+            <AlertCircle aria-hidden className="mt-0.5 size-3.5 shrink-0" />
+            Ownership of this employee changed. Refresh the page; review actions stay disabled.
+          </p>
+        ) : null}
 
         {error ? (
           <p
@@ -625,8 +817,12 @@ export function TaskDetailPanel({
           </p>
         ) : null}
 
-        {task.fileUrl ? (
-          <FilePreview url={task.fileUrl} />
+        {attachments.length > 0 ? (
+          <div className="space-y-2">
+            {attachments.map((url, index) => (
+              <FilePreview key={`${url}-${index}`} url={url} index={index} total={attachments.length} />
+            ))}
+          </div>
         ) : null}
         {taskDoc?.signatureUrl ? <SignaturePreview signature={taskDoc.signatureUrl} /> : null}
 
@@ -660,7 +856,7 @@ export function TaskDetailPanel({
               aria-label="Skip requirement"
               data-testid="task-skip-switch"
               disabled={blocked}
-              onClick={() => setSkipOpen(true)}
+              onClick={() => openReview("skip")}
               className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 ${
                 skipped ? "bg-[#109B85]" : "bg-slate-300"
               }`}
@@ -701,7 +897,12 @@ export function TaskDetailPanel({
                 data-testid="blank-form-link-input"
                 value={linkValue}
                 disabled={blocked}
-                onChange={(event) => setLinkDraft(event.target.value)}
+                onChange={(event) => {
+                  // Capture the revision the admin started editing; a live
+                  // change during typing makes the save conflict.
+                  setLinkBaseRevision((current) => current ?? { revision })
+                  setLinkDraft(event.target.value)
+                }}
                 placeholder="https://..."
                 className="h-9 min-w-0 flex-1 rounded-lg border border-slate-200 bg-slate-50 px-3 text-[13px] text-slate-800 outline-none focus-visible:border-slate-400 disabled:opacity-60"
               />
@@ -719,30 +920,25 @@ export function TaskDetailPanel({
           </div>
         ) : null}
 
-        {downloadAvailable ? (
-          task.actionType === "upload" && task.fileUrl ? (
-            <a
-              data-testid="task-download"
-              href={task.fileUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-[13px] font-bold text-emerald-600 hover:bg-emerald-100"
-            >
+        {downloadAvailable && primaryFile ? (
+          <a
+            data-testid="task-download"
+            href={primaryFile}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-[13px] font-bold text-emerald-600 hover:bg-emerald-100"
+          >
+            {task.actionType === "upload" ? (
               <Download className="size-4" />
-              Download Original
-            </a>
-          ) : task.fileUrl ? (
-            <a
-              data-testid="task-download"
-              href={task.fileUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-[13px] font-bold text-emerald-600 hover:bg-emerald-100"
-            >
+            ) : (
               <FileText className="size-4" />
-              Open Submitted Document
-            </a>
-          ) : null
+            )}
+            {task.actionType === "upload"
+              ? attachments.length > 1
+                ? "Download First Attachment"
+                : "Download Original"
+              : "Open Submitted Document"}
+          </a>
         ) : null}
 
         {isOnboarding && task.actionType !== "upload" ? (
@@ -765,7 +961,7 @@ export function TaskDetailPanel({
         <section>
           <h3 className="text-[15px] font-bold text-slate-800">Submitted Materials</h3>
           <p className="text-muted-foreground mt-2 text-[13px]">
-            {task.fileUrl === null &&
+            {attachments.length === 0 &&
             taskDoc?.signatureUrl == null &&
             (formData === null || Object.keys(formData).length === 0)
               ? "No submission data yet."
@@ -839,7 +1035,7 @@ export function TaskDetailPanel({
             <Button
               type="button"
               data-testid="task-verify"
-              onClick={() => setVerifyOpen(true)}
+              onClick={() => openReview("verify")}
               disabled={!canAccept || blocked}
               className="h-11 flex-[2] rounded-xl bg-emerald-500 text-base font-extrabold text-white hover:bg-emerald-600"
             >
@@ -854,7 +1050,7 @@ export function TaskDetailPanel({
               type="button"
               variant="outline"
               data-testid="task-reject"
-              onClick={() => setRejectOpen(true)}
+              onClick={() => openReview("reject")}
               disabled={!canReject || blocked}
               className="h-11 flex-1 rounded-xl border-red-500 text-base font-extrabold text-red-500 hover:bg-red-50"
             >
@@ -871,27 +1067,51 @@ export function TaskDetailPanel({
         <div className="h-2" />
       </div>
 
-      <Dialog open={verifyOpen} onOpenChange={setVerifyOpen}>
+      <Dialog
+        open={dialog === "verify"}
+        onOpenChange={(open) => {
+          if (!open) {
+            closeReview()
+          }
+        }}
+      >
         <DialogContent data-testid="verify-dialog" className="sm:max-w-md">
           <h3 className="text-lg font-black text-slate-900">Verify Task?</h3>
           <p className="text-sm leading-relaxed text-slate-600">
             Are you sure you want to mark &ldquo;{task.title}&rdquo; as verified? This will complete
             the task for the employee.
           </p>
-          {error && verifyOpen ? (
+          {reviewStale ? (
+            <p
+              role="alert"
+              data-testid="verify-stale-note"
+              className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-700"
+            >
+              This submission changed since you opened this confirmation. Close it and review the
+              latest version before acting.
+            </p>
+          ) : null}
+          {error && dialog === "verify" ? (
             <p role="alert" className="text-destructive text-sm">
               {error}
             </p>
           ) : null}
           <div className="flex justify-end gap-2">
-            <Button variant="outline" onClick={() => setVerifyOpen(false)} disabled={busy === "accept"}>
+            <Button variant="outline" onClick={closeReview} disabled={busy === "accept"}>
               Cancel
             </Button>
             <Button
               type="button"
               data-testid="confirm-verify"
               onClick={() => void handleAccept()}
-              disabled={busy === "accept"}
+              disabled={
+                busy !== null ||
+                reviewStale ||
+                !actionsEnabled ||
+                !employeeActive ||
+                !ownershipValid ||
+                !canAccept
+              }
               className="bg-emerald-500 text-white hover:bg-emerald-600"
             >
               {busy === "accept" ? <Loader2 className="mr-1.5 size-4 animate-spin" /> : null}
@@ -901,7 +1121,14 @@ export function TaskDetailPanel({
         </DialogContent>
       </Dialog>
 
-      <Dialog open={rejectOpen} onOpenChange={setRejectOpen}>
+      <Dialog
+        open={dialog === "reject"}
+        onOpenChange={(open) => {
+          if (!open) {
+            closeReview()
+          }
+        }}
+      >
         <DialogContent data-testid="reject-dialog" className="sm:max-w-md">
           <h3 className="text-lg font-black text-slate-900">Reject Task</h3>
           <p className="text-sm leading-relaxed text-slate-600">
@@ -914,23 +1141,41 @@ export function TaskDetailPanel({
             onChange={(event) => setRejectReason(event.target.value)}
             placeholder="Enter rejection reason..."
             rows={3}
-            disabled={busy === "reject"}
+            disabled={busy !== null}
             className="bg-slate-50"
           />
-          {error && rejectOpen ? (
+          {reviewStale ? (
+            <p
+              role="alert"
+              data-testid="reject-stale-note"
+              className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-700"
+            >
+              This submission changed since you opened this confirmation. Close it and review the
+              latest version before acting.
+            </p>
+          ) : null}
+          {error && dialog === "reject" ? (
             <p role="alert" className="text-destructive text-sm">
               {error}
             </p>
           ) : null}
           <div className="flex justify-end gap-2">
-            <Button variant="outline" onClick={() => setRejectOpen(false)} disabled={busy === "reject"}>
+            <Button variant="outline" onClick={closeReview} disabled={busy === "reject"}>
               Cancel
             </Button>
             <Button
               type="button"
               data-testid="confirm-reject"
               onClick={() => void handleReject()}
-              disabled={rejectReason.trim().length === 0 || busy === "reject"}
+              disabled={
+                rejectReason.trim().length === 0 ||
+                busy !== null ||
+                reviewStale ||
+                !actionsEnabled ||
+                !employeeActive ||
+                !ownershipValid ||
+                !canReject
+              }
               className="bg-red-500 text-white hover:bg-red-600"
             >
               {busy === "reject" ? <Loader2 className="mr-1.5 size-4 animate-spin" /> : null}
@@ -940,7 +1185,14 @@ export function TaskDetailPanel({
         </DialogContent>
       </Dialog>
 
-      <Dialog open={skipOpen} onOpenChange={setSkipOpen}>
+      <Dialog
+        open={dialog === "skip"}
+        onOpenChange={(open) => {
+          if (!open) {
+            closeReview()
+          }
+        }}
+      >
         <DialogContent data-testid="skip-dialog" className="sm:max-w-md">
           <h3 className="text-lg font-black text-slate-900">
             {skipped ? "Unskip Form?" : "Skip Form?"}
@@ -950,20 +1202,36 @@ export function TaskDetailPanel({
               ? `Are you sure you want to make "${task.title}" required again? The employee will need to complete it.`
               : `Are you sure you want to skip "${task.title}"? The employee will be allowed to skip it, and it will be excluded from progress calculations.`}
           </p>
-          {error && skipOpen ? (
+          {reviewStale ? (
+            <p
+              role="alert"
+              data-testid="skip-stale-note"
+              className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-700"
+            >
+              This requirement changed since you opened this confirmation. Close it and review the
+              latest version before acting.
+            </p>
+          ) : null}
+          {error && dialog === "skip" ? (
             <p role="alert" className="text-destructive text-sm">
               {error}
             </p>
           ) : null}
           <div className="flex justify-end gap-2">
-            <Button variant="outline" onClick={() => setSkipOpen(false)} disabled={busy === "skip"}>
+            <Button variant="outline" onClick={closeReview} disabled={busy === "skip"}>
               Cancel
             </Button>
             <Button
               type="button"
               data-testid="confirm-skip"
               onClick={() => void handleSkip()}
-              disabled={busy === "skip"}
+              disabled={
+                busy !== null ||
+                reviewStale ||
+                !actionsEnabled ||
+                !employeeActive ||
+                !ownershipValid
+              }
               className={skipped ? "bg-slate-600 text-white" : "bg-[#109B85] text-white"}
             >
               {busy === "skip" ? <Loader2 className="mr-1.5 size-4 animate-spin" /> : null}
@@ -980,12 +1248,22 @@ function defaultLinkFor(taskId: string): string {
   return DEFAULT_BLANK_FORM_LINKS[taskId] ?? ""
 }
 
-function FilePreview({ url }: { url: string }) {
+function FilePreview({
+  url,
+  index,
+  total,
+}: {
+  url: string
+  index: number
+  total: number
+}) {
   const image = isImageUrl(url)
   const fileName = fileNameFromUrl(url)
   return (
     <div
       data-testid="task-file-preview"
+      data-file-url={url}
+      data-attachment-index={index}
       className="overflow-hidden rounded-2xl border border-slate-200 bg-slate-50"
     >
       {image ? (
@@ -1004,19 +1282,39 @@ function FilePreview({ url }: { url: string }) {
           {image ? <ImageIcon className="size-5" /> : <FileText className="size-5" />}
         </span>
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-bold text-slate-900">{fileName}</p>
+          <p className="truncate text-sm font-bold text-slate-900">
+            {total > 1 ? `${index + 1}. ${fileName}` : fileName}
+          </p>
           <p className="text-muted-foreground text-[11px]">
             {image ? "Image Attachment" : "Document File"}
+            {total > 1 ? ` · ${index + 1} of ${total}` : ""}
           </p>
         </div>
-        <a
-          href={url}
-          target="_blank"
-          rel="noreferrer"
-          className="shrink-0 text-xs font-semibold text-sky-700 hover:underline"
-        >
-          Open
-        </a>
+        <div className="flex shrink-0 items-center gap-3">
+          <a
+            data-testid="task-file-open"
+            data-file-url={url}
+            data-attachment-index={index}
+            href={url}
+            target="_blank"
+            rel="noreferrer"
+            className="text-xs font-semibold text-sky-700 hover:underline"
+          >
+            Open
+          </a>
+          <a
+            data-testid="task-file-download"
+            data-file-url={url}
+            data-attachment-index={index}
+            href={url}
+            download={fileName}
+            target="_blank"
+            rel="noreferrer"
+            className="text-xs font-semibold text-emerald-700 hover:underline"
+          >
+            Download
+          </a>
+        </div>
       </div>
     </div>
   )

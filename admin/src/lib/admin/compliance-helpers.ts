@@ -41,6 +41,7 @@ import {
   DEFAULT_TRAININGS,
 } from "@/lib/admin/seed-templates"
 import { parseTaskStatus, TASK_STATUSES, type TaskStatus } from "@/lib/admin/task-status"
+import { isTrainingCompleted } from "@/lib/admin/progress-models"
 import type {
   ClearanceStatusRaw,
   EmployeeClearanceDoc,
@@ -60,11 +61,20 @@ export interface DetailSubTask {
   actionType: string | null
   taskSource: TaskSource
   isCompleted: boolean
+  /** First attachment (compatibility convenience); use `fileUrls` to render. */
   fileUrl: string | null
+  /** EVERY submitted attachment (training certificates can be an array). */
+  fileUrls: string[]
   updatedAt: Date | null
   /** Timeline "Verified" date (onboarding completedAt / clearance verifiedAt). */
   completedAt: Date | null
   rejectionReason: string | null
+  /**
+   * Full-document fingerprint of the live submission, or `null` when the row
+   * is a canonical template default with no document. Review transactions
+   * require this exact revision, so a changed/removed submission is rejected.
+   */
+  revision: string | null
 }
 
 /**
@@ -199,10 +209,11 @@ interface RawEntry {
   /** Raw module status (validated per module below). */
   status: string
   actionType: string | null
-  fileUrl: string | null
+  fileUrls: string[]
   updatedAt: Date | null
   completedAt: Date | null
   rejectionReason: string | null
+  revision: string | null
 }
 
 function buildOnboardingEntries(read: ModuleRead<EmployeeTaskDoc>): RawEntry[] {
@@ -224,20 +235,22 @@ function buildOnboardingEntries(read: ModuleRead<EmployeeTaskDoc>): RawEntry[] {
               title: template.title,
               status: actual.status,
               actionType: template.actionType,
-              fileUrl: actual.fileUrl,
+              fileUrls: actual.fileUrl ? [actual.fileUrl] : [],
               updatedAt: actual.updatedAt,
               completedAt: actual.completedAt,
               rejectionReason: actual.rejectionReason,
+              revision: actual.revision,
             }
           : {
               id: template.id,
               title: template.title,
               status: "notStarted",
               actionType: template.actionType,
-              fileUrl: null,
+              fileUrls: [],
               updatedAt: null,
               completedAt: null,
               rejectionReason: null,
+              revision: null,
             },
       )
       pushed.add(template.id)
@@ -255,20 +268,22 @@ function buildOnboardingEntries(read: ModuleRead<EmployeeTaskDoc>): RawEntry[] {
             title: template.title,
             status: doc.status,
             actionType: template.actionType,
-            fileUrl: doc.fileUrl,
+            fileUrls: doc.fileUrl ? [doc.fileUrl] : [],
             updatedAt: doc.updatedAt,
             completedAt: doc.completedAt,
             rejectionReason: doc.rejectionReason,
+            revision: doc.revision,
           }
         : {
             id: doc.id,
             title: doc.title,
             status: doc.status,
             actionType: doc.actionType,
-            fileUrl: doc.fileUrl,
+            fileUrls: doc.fileUrl ? [doc.fileUrl] : [],
             updatedAt: doc.updatedAt,
             completedAt: doc.completedAt,
             rejectionReason: doc.rejectionReason,
+            revision: doc.revision,
           },
     )
     pushed.add(doc.id)
@@ -295,20 +310,22 @@ function buildTrainingEntries(read: ModuleRead<EmployeeTrainingDoc>): RawEntry[]
               title: template.title,
               status: actual.status,
               actionType: "upload",
-              fileUrl: actual.certificateUrl,
+              fileUrls: actual.certificateUrls,
               updatedAt: actual.completedAt ?? actual.assignedAt ?? null,
               completedAt: actual.completedAt,
               rejectionReason: actual.rejectionReason,
+              revision: actual.revision,
             }
           : {
               id: template.id,
               title: template.title,
               status: "notStarted",
               actionType: "upload",
-              fileUrl: null,
+              fileUrls: [],
               updatedAt: null,
               completedAt: null,
               rejectionReason: null,
+              revision: null,
             },
       )
       pushed.add(template.id)
@@ -326,20 +343,22 @@ function buildTrainingEntries(read: ModuleRead<EmployeeTrainingDoc>): RawEntry[]
             title: template.title,
             status: doc.status,
             actionType: "upload",
-            fileUrl: doc.certificateUrl,
+            fileUrls: doc.certificateUrls,
             updatedAt: doc.completedAt ?? doc.assignedAt ?? null,
             completedAt: doc.completedAt,
             rejectionReason: doc.rejectionReason,
+            revision: doc.revision,
           }
         : {
             id: doc.id,
             title: doc.title,
             status: doc.status,
             actionType: "upload",
-            fileUrl: doc.certificateUrl,
+            fileUrls: doc.certificateUrls,
             updatedAt: doc.completedAt ?? doc.assignedAt ?? null,
             completedAt: doc.completedAt,
             rejectionReason: doc.rejectionReason,
+            revision: doc.revision,
           },
     )
     pushed.add(doc.id)
@@ -366,20 +385,22 @@ function buildClearanceEntries(read: ModuleRead<EmployeeClearanceDoc>): RawEntry
               title: template.title,
               status: actual.status,
               actionType: "upload",
-              fileUrl: actual.fileUrl,
+              fileUrls: actual.fileUrl ? [actual.fileUrl] : [],
               updatedAt: actual.verifiedAt ?? actual.submittedAt ?? null,
               completedAt: actual.verifiedAt,
               rejectionReason: actual.rejectionReason,
+              revision: actual.revision,
             }
           : {
               id: template.id,
               title: template.title,
               status: "pending",
               actionType: "upload",
-              fileUrl: null,
+              fileUrls: [],
               updatedAt: null,
               completedAt: null,
               rejectionReason: null,
+              revision: null,
             },
       )
       pushed.add(template.id)
@@ -397,20 +418,22 @@ function buildClearanceEntries(read: ModuleRead<EmployeeClearanceDoc>): RawEntry
             title: template.title,
             status: doc.status,
             actionType: "upload",
-            fileUrl: doc.fileUrl,
+            fileUrls: doc.fileUrl ? [doc.fileUrl] : [],
             updatedAt: doc.verifiedAt ?? doc.submittedAt ?? null,
             completedAt: doc.verifiedAt,
             rejectionReason: doc.rejectionReason,
+            revision: doc.revision,
           }
         : {
             id: doc.id,
             title: doc.title,
             status: doc.status,
             actionType: "upload",
-            fileUrl: doc.fileUrl,
+            fileUrls: doc.fileUrl ? [doc.fileUrl] : [],
             updatedAt: doc.verifiedAt ?? doc.submittedAt ?? null,
             completedAt: doc.verifiedAt,
             rejectionReason: doc.rejectionReason,
+            revision: doc.revision,
           },
     )
     pushed.add(doc.id)
@@ -434,10 +457,12 @@ function buildOnboardingRows(read: ModuleRead<EmployeeTaskDoc>): DetailSubTask[]
       actionType: entry.actionType,
       taskSource: "onboarding",
       isCompleted: isDone,
-      fileUrl: entry.fileUrl,
+      fileUrl: entry.fileUrls[0] ?? null,
+      fileUrls: entry.fileUrls,
       updatedAt: entry.updatedAt,
       completedAt: entry.completedAt,
       rejectionReason: entry.rejectionReason,
+      revision: entry.revision,
     }
   })
 }
@@ -460,11 +485,13 @@ function buildTrainingRows(read: ModuleRead<EmployeeTrainingDoc>): DetailSubTask
       status: mapTrainingStatus(rawStatus),
       actionType: entry.actionType,
       taskSource: "training",
-      isCompleted: rawStatus === "verified" || rawStatus === "completed",
-      fileUrl: entry.fileUrl,
+      isCompleted: isTrainingCompleted(rawStatus),
+      fileUrl: entry.fileUrls[0] ?? null,
+      fileUrls: entry.fileUrls,
       updatedAt: entry.updatedAt,
       completedAt: entry.completedAt,
       rejectionReason: entry.rejectionReason,
+      revision: entry.revision,
     }
   })
 }
@@ -488,10 +515,12 @@ function buildClearanceRows(read: ModuleRead<EmployeeClearanceDoc>): DetailSubTa
       actionType: entry.actionType,
       taskSource: "clearance",
       isCompleted: rawStatus === "verified",
-      fileUrl: entry.fileUrl,
+      fileUrl: entry.fileUrls[0] ?? null,
+      fileUrls: entry.fileUrls,
       updatedAt: entry.updatedAt,
       completedAt: entry.completedAt,
       rejectionReason: entry.rejectionReason,
+      revision: entry.revision,
     }
   })
 }

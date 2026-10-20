@@ -10,6 +10,7 @@ import {
 import { getFirebaseFirestore } from "@/lib/firebase/client"
 import { FIREBASE_COLLECTIONS } from "@/lib/firebase/collections"
 import { parseTaskStatus, type TaskStatus } from "@/lib/admin/task-status"
+import { submissionRevision } from "@/lib/admin/task-revision"
 import { str } from "@/lib/admin/dashboard-streams"
 import type { LiveStreamController } from "@/lib/admin/stream-protocol"
 
@@ -134,6 +135,8 @@ export interface EmployeeTaskDoc {
   signedAt: Date | null
   hasFormData: boolean
   hasAdminFormData: boolean
+  /** Full-document fingerprint of the submission this snapshot represents. */
+  revision: string
 }
 
 /** Firestore maps are plain objects; arrays/nulls never qualify. */
@@ -176,7 +179,42 @@ export function mapTaskDoc(id: string, data: DocumentData): EmployeeTaskDoc {
     signedAt: toDate(data.signedAt),
     hasFormData: data.formData != null,
     hasAdminFormData: data.adminFormData != null,
+    revision: submissionRevision(data),
   }
+}
+
+/**
+ * Certificate attachments with the EXACT precedence of the Flutter
+ * TrainingDTO (training_dto.dart):
+ *   `certificateUrls != null` → use that array (a present-but-empty array
+ *   wins over the legacy field), otherwise fall back to `certificateUrl`.
+ *
+ * Hardening over Dart: malformed array entries are dropped instead of
+ * throwing, a non-array `certificateUrls` value falls back to the legacy
+ * field, and duplicates are removed while preserving first-seen order.
+ */
+export function resolveCertificateUrls(data: DocumentData): string[] {
+  const raw = data.certificateUrls
+  if (raw !== null && raw !== undefined) {
+    const values = Array.isArray(raw)
+      ? raw
+      : // Malformed non-array value: do not lose a legacy attachment.
+        null
+    const seen = new Set<string>()
+    const urls: string[] = []
+    for (const value of values ?? []) {
+      if (typeof value !== "string" || value.length === 0 || seen.has(value)) {
+        continue
+      }
+      seen.add(value)
+      urls.push(value)
+    }
+    if (values !== null) {
+      return urls
+    }
+  }
+  const legacy = data.certificateUrl
+  return typeof legacy === "string" && legacy.length > 0 ? [legacy] : []
 }
 
 export interface EmployeeTrainingDoc {
@@ -185,11 +223,16 @@ export interface EmployeeTrainingDoc {
   description: string | null
   durationText: string | null
   status: TrainingStatusRaw
+  /** Raw legacy field, kept for DTO parity; prefer `certificateUrls`. */
   certificateUrl: string | null
+  /** Every valid certificate attachment, order preserved, de-duplicated. */
+  certificateUrls: string[]
   completedAt: Date | null
   dueDate: Date | null
   assignedAt: Date | null
   rejectionReason: string | null
+  /** Full-document fingerprint of the submission this snapshot represents. */
+  revision: string
 }
 
 export function mapTrainingDoc(id: string, data: DocumentData): EmployeeTrainingDoc {
@@ -209,6 +252,7 @@ export function mapTrainingDoc(id: string, data: DocumentData): EmployeeTraining
       typeof data.certificateUrl === "string" && data.certificateUrl.length > 0
         ? data.certificateUrl
         : null,
+    certificateUrls: resolveCertificateUrls(data),
     completedAt: toDate(data.completedAt),
     dueDate: toDate(data.dueDate),
     assignedAt: toDate(data.assignedAt),
@@ -216,6 +260,7 @@ export function mapTrainingDoc(id: string, data: DocumentData): EmployeeTraining
       typeof data.rejectionReason === "string" && data.rejectionReason.length > 0
         ? data.rejectionReason
         : null,
+    revision: submissionRevision(data),
   }
 }
 
@@ -229,6 +274,8 @@ export interface EmployeeClearanceDoc {
   dueDate: Date | null
   submittedAt: Date | null
   verifiedAt: Date | null
+  /** Full-document fingerprint of the submission this snapshot represents. */
+  revision: string
 }
 
 export function mapClearanceDoc(id: string, data: DocumentData): EmployeeClearanceDoc {
@@ -248,6 +295,7 @@ export function mapClearanceDoc(id: string, data: DocumentData): EmployeeClearan
     dueDate: toDate(data.dueDate),
     submittedAt: toDate(data.submittedAt),
     verifiedAt: toDate(data.verifiedAt),
+    revision: submissionRevision(data),
   }
 }
 

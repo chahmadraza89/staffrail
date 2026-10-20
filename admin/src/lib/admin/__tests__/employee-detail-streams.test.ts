@@ -18,6 +18,7 @@ import {
   mapTrainingDoc,
   moduleForSource,
   parseEmployeeProfile,
+  resolveCertificateUrls,
   type EmployeeDetailSnapshot,
 } from "@/lib/admin/employee-detail-streams"
 
@@ -170,6 +171,48 @@ describe("mapTaskDoc / mapTrainingDoc / mapClearanceDoc", () => {
       " https://cert",
     )
     expect(mapClearanceDoc("y", { fileUrl: "" }).fileUrl).toBeNull()
+  })
+
+  it("resolves certificate attachments with DTO precedence, de-duplication and order", () => {
+    expect(
+      resolveCertificateUrls({
+        certificateUrls: ["https://b", "https://a", "https://b"],
+        certificateUrl: "https://legacy",
+      }),
+    ).toEqual(["https://b", "https://a"])
+    expect(resolveCertificateUrls({ certificateUrl: "https://legacy" })).toEqual([
+      "https://legacy",
+    ])
+    expect(
+      resolveCertificateUrls({ certificateUrls: [], certificateUrl: "https://legacy" }),
+    ).toEqual([])
+    expect(
+      resolveCertificateUrls({
+        certificateUrls: [null, 42, "", "https://ok", "https://ok"],
+        certificateUrl: "https://legacy",
+      }),
+    ).toEqual(["https://ok"])
+    expect(
+      resolveCertificateUrls({
+        certificateUrls: "malformed",
+        certificateUrl: "https://legacy",
+      }),
+    ).toEqual(["https://legacy"])
+    expect(resolveCertificateUrls({})).toEqual([])
+  })
+
+  it("stamps a full-document revision that changes with the submission", () => {
+    const base = mapTaskDoc("resume", { status: "submitted", fileUrl: "https://old" })
+    const replacement = mapTaskDoc("resume", {
+      status: "submitted",
+      fileUrl: "https://new",
+    })
+    expect(base.revision).not.toBe(replacement.revision)
+    expect(
+      mapTaskDoc("resume", { fileUrl: "https://old", status: "submitted" }).revision,
+    ).toBe(base.revision)
+    expect(mapTrainingDoc("start", { status: "underReview" }).revision).toBeTruthy()
+    expect(mapClearanceDoc("tb", { status: "pending" }).revision).toBeTruthy()
   })
 })
 

@@ -123,9 +123,24 @@ export interface EmployeeTaskDoc {
   dueDate: Date | null
   fileUrl: string | null
   signatureUrl: string | null
+  /** Raw split/dual-role signatures written by the admin counter-sign flow. */
+  adminSignatureUrl: string | null
   rejectionReason: string | null
+  /** Full submitted employee form payload (task review panel / form views). */
+  formData: Record<string, unknown> | null
+  /** Full administrative review payload (counter-signature fields). */
+  adminFormData: Record<string, unknown> | null
+  blankFormLink: string | null
+  signedAt: Date | null
   hasFormData: boolean
   hasAdminFormData: boolean
+}
+
+/** Firestore maps are plain objects; arrays/nulls never qualify. */
+function objectField(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null
 }
 
 export function mapTaskDoc(id: string, data: DocumentData): EmployeeTaskDoc {
@@ -144,10 +159,21 @@ export function mapTaskDoc(id: string, data: DocumentData): EmployeeTaskDoc {
       typeof data.signatureUrl === "string" && data.signatureUrl.length > 0
         ? data.signatureUrl
         : null,
+    adminSignatureUrl:
+      typeof data.adminSignatureUrl === "string" && data.adminSignatureUrl.length > 0
+        ? data.adminSignatureUrl
+        : null,
     rejectionReason:
       typeof data.rejectionReason === "string" && data.rejectionReason.length > 0
         ? data.rejectionReason
         : null,
+    formData: objectField(data.formData),
+    adminFormData: objectField(data.adminFormData),
+    blankFormLink:
+      typeof data.blankFormLink === "string" && data.blankFormLink.length > 0
+        ? data.blankFormLink
+        : null,
+    signedAt: toDate(data.signedAt),
     hasFormData: data.formData != null,
     hasAdminFormData: data.adminFormData != null,
   }

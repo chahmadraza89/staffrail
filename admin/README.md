@@ -296,8 +296,69 @@ Port of the Flutter `AdminDirectoryInnerProfileCard` screen. Data model:
   unreachable (template-backed categories are never all-empty on a ready
   read), exactly like the Flutter source.
 - Header lifecycle actions (Edit / Deactivate / durable Complete-setup
-  recovery) behave identically to the Directory cards. The task detail /
-  review panel (accept / reject / skip / blank-form) is the next step.
+  recovery) behave identically to the Directory cards.
+
+### Task review panel (accept / reject / skip / blank form)
+
+Port of `TaskDetailPanel` + the Flutter split-screen task manager.
+`src/app/dashboard/directory/[employeeId]/task-manager.tsx` renders the
+checklist tiles plus the selected requirement; on screens ≥ 1280 px the
+detail is a sticky side pane, below that the same panel opens in a dialog.
+Requirements keep their `source:id` identity, so a training `start` row and
+an onboarding `start` row open different panels.
+
+Task actions live in `src/lib/admin/task-actions.ts` as **direct Firestore
+writes** (no new callables) and mirror the Dart payloads the employee app
+reads. Ownership fields (`employeeName`, and `title` for skip) are added when
+the admin surface passes them:
+
+| Action | Source | Write |
+| --- | --- | --- |
+| Accept | onboarding | `setDoc(merge)`: `verified`, `isCompleted: true`, `updatedAt`, `completedAt`, `employeeName` |
+| Accept | training | `updateDoc`: `verified`, `updatedAt` (Dart does **not** stamp `completedAt` here — kept verbatim) |
+| Accept | clearance | `updateDoc`: `verified`, `verifiedAt`, `updatedAt` |
+| Reject | onboarding | `setDoc(merge)`: `rejected`, `isCompleted: false`, `updatedAt`, `rejectionReason`, `employeeName` |
+| Reject | training / clearance | `updateDoc`: `actionRequired`, `updatedAt`, `rejectionReason` |
+| Skip / unskip | onboarding | `setDoc(merge)`: `noActionRequired` / `notStarted`, `isCompleted: false`, `updatedAt`, `employeeName`, `title` |
+| Blank form URL | I-9 / W-9 onboarding | `updateDoc`: **only** `blankFormLink`, `updatedAt` |
+
+Documented corrections (no Firestore data is repaired by the panel):
+
+1. **Skip is onboarding-only.** Flutter showed the skip switch for every
+   source but always wrote to `onboarding_tasks`, so skipping a training or
+   clearance row silently wrote to a non-existent document. The control is
+   hidden for those sources and the action rejects them defensively.
+2. **Blank-form links are non-destructive.** Flutter re-sent the task status
+   and `isCompleted: false`, which un-completed verified I-9/W-9 tasks; it
+   also used `setDoc`, which could recreate a deleted task. The web panel
+   writes only `blankFormLink + updatedAt`, requires an `http(s)` URL, and is
+   restricted to the two tax tasks.
+3. **No stale approvals.** Every review control is disabled while the
+   owning module holds retained (stale) data. Approving from a snapshot that
+   may be minutes old can double-review an already-decided task; the panel
+   shows an explicit "live data could not be refreshed" note instead of
+   failing silently. Retained rows stay readable.
+4. **Split-field tasks keep Flutter's hidden approve/reject** (they are
+   counter-signed through their form) but show a read-only employee +
+   administrative submission summary so reviewers can inspect what was
+   submitted. `AdminAcknowledgeFormView` renders legal documents verbatim
+   from `src/lib/admin/legal-content.ts`.
+5. **No fabricated admin upload / audit PDF yet.** Phase 5 owns uploads and
+   server-side PDFs. For now the panel links directly to uploaded originals
+   and renders the submitted form data; it never claims a document download
+   that does not exist.
+
+The task timeline, skip control, blank-form card, file/signature previews,
+form data, administrative review (including the rejection reason) and
+activity footer are all covered by tests in
+`src/app/dashboard/directory/__tests__/task-detail-panel.test.tsx` and
+`admin-form-views.test.tsx`; the payloads are pinned in
+`src/lib/admin/__tests__/task-actions.test.ts`.
+
+**Production prerequisite:** these are client writes, so Firestore security
+rules are the only server-side guard. Confirm the console-managed rules only
+allow an admin to write tasks for employees they own (`adminId`) before
+using this panel against real data.
 
 
 

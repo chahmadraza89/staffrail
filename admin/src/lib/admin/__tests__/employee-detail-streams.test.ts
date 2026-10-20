@@ -120,6 +120,10 @@ describe("mapTaskDoc / mapTrainingDoc / mapClearanceDoc", () => {
       updatedAt: { seconds: 1700000000 },
       completedAt: { toDate: () => new Date(2026, 0, 5) },
       formData: { link: "x" },
+      adminFormData: { supervisorName: "Dana" },
+      adminSignatureUrl: "typed:Dana Admin",
+      blankFormLink: "https://uscis.gov/i-9.pdf",
+      signedAt: { toDate: () => new Date(2026, 0, 4) },
       fileUrl: "https://f",
       rejectionReason: "",
     }
@@ -132,12 +136,22 @@ describe("mapTaskDoc / mapTrainingDoc / mapClearanceDoc", () => {
       actionType: "upload",
       isCompleted: true,
       hasFormData: true,
-      hasAdminFormData: false,
+      hasAdminFormData: true,
       fileUrl: "https://f",
       rejectionReason: null, // empty string → null
+      formData: { link: "x" },
+      adminFormData: { supervisorName: "Dana" },
+      adminSignatureUrl: "typed:Dana Admin",
+      blankFormLink: "https://uscis.gov/i-9.pdf",
     })
+    expect(mapped.signedAt?.getTime()).toBe(new Date(2026, 0, 4).getTime())
     expect(mapped.updatedAt?.getTime()).toBe(1700000000 * 1000)
     expect(mapped.completedAt?.getTime()).toBe(new Date(2026, 0, 5).getTime())
+
+    // Arrays are never treated as form maps (only plain objects are).
+    const arrayForm = mapTaskDoc("arr", { formData: [1, 2] })
+    expect(arrayForm.formData).toBeNull()
+    expect(arrayForm.hasFormData).toBe(true)
 
     const empty = mapTaskDoc("blank", {})
     expect(empty).toMatchObject({

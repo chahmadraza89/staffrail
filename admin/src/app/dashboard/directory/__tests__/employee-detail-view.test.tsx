@@ -662,3 +662,89 @@ describe("EmployeeDetailView — durable setup recovery", () => {
     expect(screen.getByTestId("detail-setup-incomplete")).toBeInTheDocument()
   })
 })
+
+/* ── task review panel (step 3) ──────────────────────────────────────────── */
+
+describe("EmployeeDetailView — task review panel integration", () => {
+  const submittedOnboarding = {
+    id: "onboarding_acknowledgment_form",
+    data: {
+      title: "Onboarding Acknowledgment form",
+      status: "submitted",
+      actionType: "acknowledgeSign",
+      isCompleted: false,
+      formData: { fullName: "Ahmad Raza" },
+      signatureUrl: "typed:Ahmad Raza",
+      updatedAt: new Date(2026, 9, 12),
+    },
+  }
+
+  it("opens the review panel from a requirement tile and closes it", () => {
+    renderDetail()
+    emitProfileStage(activeStage())
+    emitReadyDetail([submittedOnboarding])
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /Onboarding Acknowledgment form/ }),
+    )
+
+    const dialog = screen.getByTestId("task-detail-dialog")
+    expect(dialog).toHaveTextContent("Onboarding Acknowledgment form")
+    expect(screen.getByTestId("task-actions")).toBeInTheDocument()
+    // The raw onboarding doc is joined by source+id and drives the form view.
+    expect(screen.getByTestId("task-form-view")).toHaveTextContent("Ahmad Raza")
+    expect(screen.getByTestId("task-signature-preview")).toHaveTextContent("Ahmad Raza")
+
+    fireEvent.click(screen.getByTestId("task-close"))
+    expect(screen.queryByTestId("task-detail-dialog")).not.toBeInTheDocument()
+  })
+
+  it("disables review actions when the owning module only has retained data", () => {
+    renderDetail()
+    emitProfileStage(activeStage())
+    emitReadyDetail([{ id: "resume", data: { title: "Resume", status: "submitted" } }])
+
+    fire(() =>
+      detailCtrl!.fail(
+        "onboardingTasks",
+        Object.assign(new Error("down"), { code: "unavailable" }),
+      ),
+    )
+
+    expect(screen.getByTestId("compliance-stale-note")).toBeInTheDocument()
+    fireEvent.click(screen.getByRole("button", { name: /Resume/ }))
+
+    expect(screen.getByTestId("task-actions-unavailable")).toBeInTheDocument()
+    expect(screen.getByTestId("task-verify")).toBeDisabled()
+    expect(screen.getByTestId("task-reject")).toBeDisabled()
+  })
+
+  it("keeps the same-id training row distinct from the onboarding row", () => {
+    renderDetail()
+    emitProfileStage(activeStage())
+    emitReadyDetail(
+      [{ id: "start", data: { title: "Onboarding START", status: "submitted" } }],
+      [{ id: "start", data: { title: "Training START", status: "completed" } }],
+    )
+
+    const onboardingTile = document.querySelector(
+      '[data-testid="task-tile"][data-task-key="onboarding:start"]',
+    )
+    const trainingTile = document.querySelector(
+      '[data-testid="task-tile"][data-task-key="training:start"]',
+    )
+    expect(onboardingTile).toBeTruthy()
+    expect(trainingTile).toBeTruthy()
+
+    fireEvent.click(trainingTile as HTMLElement)
+    const dialog = screen.getByTestId("task-detail-dialog")
+    // The Dart merge keeps the TEMPLATE title for matched ids and the panel
+    // reports the owning module, so the training row is unmistakable.
+    expect(dialog).toHaveTextContent("START")
+    expect(dialog).toHaveTextContent("training records")
+    // Training review needs no onboarding document view.
+    expect(screen.queryByTestId("task-form-view")).not.toBeInTheDocument()
+    expect(screen.queryByTestId("task-skip-card")).not.toBeInTheDocument()
+  })
+})
+

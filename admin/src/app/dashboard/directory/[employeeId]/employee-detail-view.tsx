@@ -4,14 +4,11 @@ import Link from "next/link"
 import { useCallback, useMemo, useState } from "react"
 import {
   ArrowLeft,
-  CheckCircle2,
   CircleUser,
-  Clock4,
   FilePenLine,
   Hourglass,
   Loader2,
   TriangleAlert,
-  X,
 } from "lucide-react"
 
 import {
@@ -22,15 +19,13 @@ import {
   EMPTY_DETAIL,
   type EmployeeProfileDetail,
   type EmployeeDetailSnapshot,
+  type EmployeeTaskDoc,
   type ModuleId,
 } from "@/lib/admin/employee-detail-streams"
 import {
   buildComplianceModel,
-  subtaskKey,
   taskProgressStats,
-  taskStatusText,
   type ComplianceCategory,
-  type DetailSubTask,
   type ModuleRead,
 } from "@/lib/admin/compliance-helpers"
 import { computeModuleProgress } from "@/lib/admin/progress-models"
@@ -42,6 +37,8 @@ import {
   EmployeeActionError,
 } from "@/lib/admin/employee-actions"
 import { useLiveQuery } from "@/lib/react/use-live-query"
+
+import { TaskManagerSection } from "./task-manager"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -318,6 +315,14 @@ export function EmployeeDetailView({
             staleModules={staleModules}
             error={detail.error}
             retry={detail.retry}
+            employeeId={employeeId}
+            onboardingTasks={detail.data.tasks}
+            employeeName={stage.employee.name}
+            actionsEnabled={{
+              onboarding: moduleUi.onboardingTasks === "ready",
+              training: moduleUi.trainings === "ready",
+              clearance: moduleUi.clearance === "ready",
+            }}
           />
 
           <EditEmployeeDialog
@@ -597,6 +602,10 @@ function ComplianceSection({
   staleModules,
   error,
   retry,
+  employeeId,
+  employeeName,
+  onboardingTasks,
+  actionsEnabled,
 }: {
   categories: ComplianceCategory[]
   progressStats: { completed: number; remaining: number }
@@ -608,6 +617,10 @@ function ComplianceSection({
   staleModules: ModuleId[]
   error: Error | null
   retry: () => void
+  employeeId: string
+  employeeName: string
+  onboardingTasks: EmployeeTaskDoc[]
+  actionsEnabled: Record<"onboarding" | "training" | "clearance", boolean>
 }) {
   // Stale categories: a category is stale when its OWNING module holds
   // retained (previously delivered) data behind a live failure.
@@ -626,8 +639,6 @@ function ComplianceSection({
 
   return (
     <section className="space-y-4">
-      <h2 className="text-lg font-semibold tracking-tight">Compliance Categories</h2>
-
       {allModulesPending ? (
         // Nothing has ever loaded — a real loading state, not an empty one.
         <DetailSkeleton testId="compliance-skeleton" />
@@ -664,8 +675,15 @@ function ComplianceSection({
                   Counts are partial — some requirements are unavailable ({partialSegments.join("; ")}).
                 </p>
               ) : null}
-              <TaskProgressBanner stats={progressStats} />
-              <CategoryList categories={categories} staleCategory={staleCategory} />
+              <TaskManagerSection
+                categories={categories}
+                progressStats={progressStats}
+                staleCategory={staleCategory}
+                employeeId={employeeId}
+                employeeName={employeeName}
+                onboardingTasks={onboardingTasks}
+                actionsEnabled={actionsEnabled}
+              />
             </>
           ) : allModulesReady ? (
             // Dart parity: 'No compliance requirements found.' only after a
@@ -684,137 +702,6 @@ function ComplianceSection({
   )
 }
 
-function TaskProgressBanner({ stats }: { stats: { completed: number; remaining: number } }) {
-  return (
-    <div
-      data-testid="task-progress-banner"
-      className="flex justify-between gap-4 rounded-xl bg-gradient-to-r from-indigo-500 to-blue-500 px-5 py-4 text-white"
-    >
-      <StatBlock label="Completed" value={stats.completed} />
-      <StatBlock label="Remaining" value={stats.remaining} />
-    </div>
-  )
-}
-
-function StatBlock({ label, value }: { label: string; value: number }) {
-  return (
-    <div>
-      <p className="text-xs opacity-80">{label}</p>
-      <p className="text-2xl font-bold tabular-nums">{value}</p>
-    </div>
-  )
-}
-
-function CategoryList({
-  categories,
-  staleCategory,
-}: {
-  categories: ComplianceCategory[]
-  staleCategory: (category: ComplianceCategory) => boolean
-}) {
-  return (
-    <div className="space-y-4">
-      {categories
-        .filter((category) => category.tasks.length > 0)
-        .map((category) => (
-          <CategoryBlock key={category.id} category={category} stale={staleCategory(category)} />
-        ))}
-    </div>
-  )
-}
-
-function CategoryBlock({
-  category,
-  stale,
-}: {
-  category: ComplianceCategory
-  stale: boolean
-}) {
-  return (
-    <Card data-testid={`category-${category.id}`}>
-      <CardContent className="space-y-2 p-5">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h3 className="text-sm font-semibold">
-            {category.title}
-            {stale ? (
-              <span
-                data-testid={`category-${category.id}-stale`}
-                className="border-amber-200 bg-amber-50 text-amber-700 ml-2 rounded-md border px-1.5 py-0.5 align-middle text-xs font-medium"
-              >
-                Stale
-              </span>
-            ) : null}
-          </h3>
-          <span className="text-muted-foreground text-xs">{category.subtitle}</span>
-        </div>
-        <TaskTileList tasks={category.tasks} />
-      </CardContent>
-    </Card>
-  )
-}
-
-const TILE_TONES: Record<string, string> = {
-  slate: "bg-muted text-muted-foreground",
-  blue: "bg-blue-50 text-blue-600",
-  green: "bg-emerald-50 text-emerald-600",
-  orange: "bg-amber-50 text-amber-600",
-  red: "bg-red-50 text-red-600",
-}
-
-function toneForStatus(status: DetailSubTask["status"]): keyof typeof TILE_TONES {
-  // getStatusColor parity (admin_directory_helpers.dart): done states use
-  // emerald green (handled by the caller), submitted-family blue, pending
-  // family amber, rejected family red, everything else slate.
-  if (status === "submitted" || status === "underReview") {
-    return "blue"
-  }
-  if (status === "pending" || status === "required" || status === "waitingForApprover") {
-    return "orange"
-  }
-  if (status === "rejected" || status === "expired") {
-    return "red"
-  }
-  return "slate"
-}
-
-function TaskTileList({ tasks }: { tasks: DetailSubTask[] }) {
-  return (
-    <ul className="space-y-1">
-      {tasks.map((task) => {
-        const done = task.isCompleted
-        const toneKey = done ? "green" : toneForStatus(task.status)
-        return (
-          <li
-            key={subtaskKey(task)}
-            className="hover:bg-muted/40 flex items-center gap-3 rounded-md px-2 py-2 text-sm"
-            data-testid="task-tile"
-          >
-            <span
-              aria-hidden
-              className={`flex size-7 shrink-0 items-center justify-center rounded-md ${TILE_TONES[toneKey]}`}
-            >
-              {task.status === "noActionRequired" ? <X className="size-3.5" /> : <Clock4 className="size-3.5" />}
-            </span>
-            <span className="min-w-0 flex-1 truncate font-medium">{task.title}</span>
-            <span className="text-muted-foreground hidden truncate text-xs sm:block sm:max-w-48">
-              {task.subtitle}
-            </span>
-            <span className={"w-32 shrink-0 text-right text-xs font-medium " + (done ? "text-emerald-600" : "text-amber-600")}>
-              {taskStatusText(task.status)}
-            </span>
-            <span aria-hidden className="shrink-0">
-              {done ? (
-                <CheckCircle2 className="size-4 text-emerald-600" />
-              ) : (
-                <Hourglass className="size-4 text-amber-500" />
-              )}
-            </span>
-          </li>
-        )
-      })}
-    </ul>
-  )
-}
 
 /* ── dialogs (AdminEmployeeForm/deactivate ports, same as Directory) ───── */
 

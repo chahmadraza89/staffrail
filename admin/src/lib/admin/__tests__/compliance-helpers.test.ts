@@ -47,7 +47,12 @@ function taskDoc(overrides: Partial<EmployeeTaskDoc> & { id: string }): Employee
     dueDate: null,
     fileUrl: null,
     signatureUrl: null,
+    adminSignatureUrl: null,
     rejectionReason: null,
+    formData: null,
+    adminFormData: null,
+    blankFormLink: null,
+    signedAt: null,
     hasFormData: false,
     hasAdminFormData: false,
     ...overrides,
@@ -466,6 +471,8 @@ describe("subtaskKey — identity (correction 4)", () => {
       isCompleted: false,
       fileUrl: null,
       updatedAt: null,
+      completedAt: null,
+      rejectionReason: null,
     }
     expect(subtaskKey({ ...base, id: "start", taskSource: "onboarding" })).toBe("onboarding:start")
     expect(subtaskKey({ ...base, id: "start", taskSource: "training" })).toBe("training:start")

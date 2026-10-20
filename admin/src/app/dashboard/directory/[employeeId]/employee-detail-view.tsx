@@ -237,12 +237,15 @@ export function EmployeeDetailView({
       </header>
 
       {stage === null ? (
-        errors.has("profile") ? (
-          // The profile stream failed before its first snapshot: the page
-          // shows only the actionable error (there is nothing to retain).
+        detail.status === "error" ? (
+          // Startup failures (including a synchronous subscription-builder
+          // throw recorded under the engine's `*init*` listener) leave the
+          // profile stage null. The engine's OVERALL status is authoritative
+          // here — checking `errors.has("profile")` alone would miss *init*
+          // failures and strand the page on its loading skeleton forever.
           <div className="space-y-4">
             <LiveErrorCard
-              error={errors.get("profile") ?? errors.get("onboardingTasks") ?? detail.error}
+              error={detail.error}
               retry={detail.retry}
               what="Employee profile could not be streamed."
             />

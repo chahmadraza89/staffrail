@@ -486,6 +486,51 @@ describe("EmployeeDetailView — ownership and existence gates", () => {
   })
 })
 
+/* ── startup failure (synchronous subscription-builder throw) ────────────── */
+
+describe("EmployeeDetailView — synchronous startup failure", () => {
+  it("surfaces the *init* error with a working Retry, then recovers on the next attempt", async () => {
+    // First subscription attempt throws SYNCHRONOUSLY. The real hook/engine
+    // records it under the `*init*` listener — never under "profile".
+    detailSub.mockImplementationOnce(() => {
+      throw new Error("builder exploded")
+    })
+
+    renderDetail()
+
+    // The actionable error + Retry appear; the page does not strand itself
+    // on the loading skeleton and never claims an empty compliance state.
+    const errorCard = await screen.findByTestId("live-error-card")
+    expect(errorCard).toHaveTextContent("Employee profile could not be streamed.")
+    expect(errorCard).toHaveTextContent("builder exploded")
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument()
+    expect(screen.queryByTestId("detail-skeleton")).not.toBeInTheDocument()
+    expect(screen.queryByTestId("compliance-skeleton")).not.toBeInTheDocument()
+    expect(screen.queryByTestId("no-requirements")).not.toBeInTheDocument()
+
+    // The NEXT attempt (after Retry) initializes successfully.
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }))
+    await vi.waitFor(() => {
+      expect(detailSub).toHaveBeenCalledTimes(2)
+      expect(detailCtrl).toBeDefined()
+    })
+
+    // Deliver the owned profile + all three module snapshots through the
+    // real engine; the retained gate/attach choreography stays intact.
+    emitProfileStage(activeStage())
+    emitReadyDetail()
+
+    // The error clears and the normal detail page renders in full.
+    expect(screen.queryByTestId("live-error-card")).not.toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument()
+    expect(screen.getByTestId("profile-header")).toHaveTextContent("Ahmad Raza")
+    expect(screen.getByText("Compliance Categories")).toBeInTheDocument()
+    expect(screen.getAllByTestId("task-tile")).toHaveLength(69)
+    expect(screen.getByTestId("task-progress-banner")).toHaveTextContent("69")
+    expect(screen.queryByTestId("progress-partial-note")).not.toBeInTheDocument()
+  })
+})
+
 function throwIfModulesAttached(): void {
   if (modulesAttached) {
     throw new Error("document modules attached although the gate never passed")

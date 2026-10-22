@@ -21,5 +21,12 @@ export default defineConfig({
     // `// @vitest-environment jsdom`.
     include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
     setupFiles: ["src/test-shims/vitest.setup.ts"],
+    // Radix dialogs + jsdom are slow on CI-class machines; individual tests
+    // can take several seconds even though they never wait on real network.
+    testTimeout: 15_000,
+    hookTimeout: 15_000,
+    // Keep peak memory bounded: several jsdom suites in parallel exhaust the
+    // Windows fork pool (workers exit mid-run).
+    maxWorkers: 2,
   },
 })

@@ -138,6 +138,17 @@ fails with `permission-denied`, the correct fix is to allow the *admin
 role* in the existing rules (pattern used by the Flutter app), not to open
 the collection.
 
+Feature-screen writes performed with the browser SDK:
+
+- Directory: `users/{uid}` (provisioning/update/deactivate) and
+  `users/{uid}/{onboarding_tasks|trainings|clearance}` (task review).
+- Training: `training_templates/{id}` (create) and
+  `users/{uid}/trainings/{templateId}` (assign). The rules must allow an
+  admin to create templates only for `adminId === request.auth.uid` and to
+  assign training only to employees they own (`users/{uid}.adminId`).
+  The client-side ownership checks are defense in depth, not a replacement
+  for rules.
+
 ## Firestore composite indexes
 
 The dashboard's "Action Required" query filters the `onboarding_tasks`
@@ -407,6 +418,86 @@ rules remain the ONLY server-side authority. The client checks above are
 defense in depth, not a substitute. Confirm the console-managed rules allow
 only an admin to read/write tasks for employees they own (`adminId`) and deny
 employee self-approval before using this panel against real data.
+
+### Training management (`/dashboard/training`)
+
+Port of the Flutter admin training web screen
+(`admin_training/presentation/screens/web/admin_training_web.dart`):
+
+- **Counters** — total templates, overall compliance rate and overdue
+  trainings. Any counter opens the compliance report, matching Flutter.
+- **Assign New Training** — template, optional deadline/instructions, and
+  either *All Staff* or individual selection with search.
+- **Active Training Modules** — one card per template with its completion
+  bar and `completed / total` staff count.
+- **Create New Template** — title, description, duration string and
+  requirement type (`certificate` / `acknowledgement`).
+- **Quick Info** — global compliance, overdue count, template count and the
+  help text.
+
+Data comes from three independent live streams in
+`src/lib/admin/training-streams.ts`:
+
+| Stream | Query |
+| --- | --- |
+| Templates | `training_templates` (all documents) |
+| Assignments | collection group `trainings` where `adminId == adminUid` |
+| Staff | `users` where `adminId == adminUid` and `role == employee` |
+
+Readiness is per source: counters and progress show `—`/“Waiting for
+assignment data…” until the relevant listeners delivered, and genuine empty
+states appear only after a ready snapshot. A failure keeps the last good
+data visible with an explicit **stale** note and a Retry that resubscribes.
+
+Actions live in `src/lib/admin/training-actions.ts` as direct Firestore
+writes (no new callables):
+
+- **Create template** writes the Dart payload
+  (`title`, `description`, `durationText`, `requirementType`,
+  `isActive: true`, `createdAt`, `updatedAt`) plus `adminId` for rules and
+  audits. Fields are trimmed and validated.
+- **Assign** runs ONE transaction that reads the template, every employee
+  profile and every existing training document BEFORE writing. The template
+  must exist; every employee must still be `role: "employee"`, owned by the
+  signed-in admin and active. The write is the full `TrainingDTO` map plus
+  `adminId`, with `status: "notStarted"` and the combined description
+  `"<instructions>\n\n<template description>"`.
+
+Documented corrections (no stored data is mutated):
+
+1. **Assignments are non-destructive.** Flutter's `batch.set` overwrote the
+   employee's whole training document, so re-assigning a template reset real
+   uploads, status and completion timestamps. The web action never overwrites
+   an existing assignment; those employees are reported as *already had this
+   training* and left untouched.
+2. **Inactive employees are excluded.** They stay visible (marked Inactive)
+   for transparency but cannot be selected or included in *All Staff*; the
+   transaction re-checks activation at write time and reports them as
+   skipped instead of creating new work for them.
+3. **No fabricated zeros.** Flutter printed `0.0%` for every template while
+   the assignment stream was still loading. The web panel waits for the
+   listener before showing progress, so “not loaded”, “genuinely 0%” and
+   “failed (stale value)” are distinguishable.
+4. **Approved trainings count as complete.** Completion uses
+   `completed` **or** `verified` (the status the admin approval writes),
+   matching the shared progress calculator from the task-review correction.
+5. **Templates without `createdAt` are not hidden.** Flutter ordered the
+   query by `createdAt`, which silently omitted documents missing that field
+   (and required a composite index). The web panel reads the collection,
+   sorts newest-first client-side, and places missing timestamps last.
+
+Tests: `src/lib/admin/__tests__/training-streams.test.ts` (mapping,
+ordering, verified counting, stats/overdue/rounding),
+`training-actions.test.ts` (payload parity, non-destructive assignment,
+inactive/ownership/role checks, retry revalidation, recipient limits) and
+`src/app/dashboard/training/__tests__/training-view.test.tsx`
+(connecting/ready/empty/error+retry states, create validation, all-staff vs
+individual assignment, compliance-report pending/stale behavior).
+
+**Live-data limits:** assignment and template writes are browser writes.
+Firestore rules must authorize admin-only template creation and
+admin-owned employee training writes. Live verification of the flows needs
+Firebase Admin credentials and a populated project (see Configuration).
 
 
 

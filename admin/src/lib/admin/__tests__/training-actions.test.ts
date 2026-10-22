@@ -249,7 +249,6 @@ describe("assignTraining — payload parity", () => {
         durationText: "45 mins",
         status: "notStarted",
         certificateUrl: null,
-        certificateUrls: [],
         dueDate: { __timestamp: deadline.toISOString() },
         completedAt: null,
         updatedAt: "SERVER_TS",
@@ -261,6 +260,9 @@ describe("assignTraining — payload parity", () => {
         adminId: ADMIN,
         assignedAt: null,
       })
+      // The Flutter upload DTO only writes the legacy certificateUrl field.
+      // Storing an empty certificateUrls array here would shadow it forever.
+      expect("certificateUrls" in state.docs.get(trainingPath(uid))!).toBe(false)
     }
   })
 

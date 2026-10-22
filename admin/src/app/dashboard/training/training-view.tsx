@@ -31,6 +31,7 @@ import type {
 } from "@/lib/admin/training-models"
 import { isIndexCompatibilityError } from "@/lib/admin/stream-protocol"
 import { useLiveQuery, type LiveQueryResult } from "@/lib/react/use-live-query"
+import { useManagedClock } from "@/lib/react/use-managed-clock"
 
 import { AssignTrainingDialog } from "@/app/dashboard/training/assign-training-dialog"
 import { ComplianceReportDialog } from "@/app/dashboard/training/compliance-report-dialog"
@@ -60,7 +61,10 @@ import { Progress } from "@/components/ui/progress"
  *   - failures keep retained data visible with an explicit stale note and a
  *     Retry that resubscribes;
  *   - assignment/create actions are disabled until the lists they depend on
- *     are fully loaded.
+ *     are fully loaded;
+ *   - the overdue counter is derived against a managed clock (60 s interval
+ *     plus visibility refresh), so a passing deadline updates without any
+ *     Firestore snapshot or write.
  */
 
 const EMPTY_TEMPLATES: AdminTrainingTemplate[] = []
@@ -112,9 +116,10 @@ export function TrainingView({ adminUid, adminEmail }: TrainingViewProps) {
     initialData: EMPTY_STAFF,
   })
 
+  const now = useManagedClock()
   const stats = useMemo<AdminTrainingStats>(
-    () => deriveTrainingStats(templates.data, assignments.data),
-    [templates.data, assignments.data],
+    () => deriveTrainingStats(templates.data, assignments.data, now),
+    [templates.data, assignments.data, now],
   )
   const compliance = useMemo(
     () => buildTrainingCompliance(assignments.data),

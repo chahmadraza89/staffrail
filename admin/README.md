@@ -448,6 +448,16 @@ Readiness is per source: counters and progress show `—`/“Waiting for
 assignment data…” until the relevant listeners delivered, and genuine empty
 states appear only after a ready snapshot. A failure keeps the last good
 data visible with an explicit **stale** note and a Retry that resubscribes.
+The compliance report makes the same distinction: a failed template read can
+never render “No training modules found.” (only a *ready, empty* read can),
+and a retained-empty result after a failure stays visible with a **stale**
+label.
+
+The overdue counter is time-derived, not snapshot-derived. A managed clock
+(`src/lib/react/use-managed-clock.ts`) advances once per minute and refreshes
+immediately on `visibilitychange`, so a deadline passing while the page stays
+open updates the counter without any Firestore snapshot or write. Completed
+and verified assignments remain excluded from the count.
 
 Actions live in `src/lib/admin/training-actions.ts` as direct Firestore
 writes (no new callables):
@@ -459,9 +469,10 @@ writes (no new callables):
 - **Assign** runs ONE transaction that reads the template, every employee
   profile and every existing training document BEFORE writing. The template
   must exist; every employee must still be `role: "employee"`, owned by the
-  signed-in admin and active. The write is the full `TrainingDTO` map plus
-  `adminId`, with `status: "notStarted"` and the combined description
-  `"<instructions>\n\n<template description>"`.
+  signed-in admin and active. The write is the full initial `TrainingDTO` map
+  plus `adminId`, with `status: "notStarted"` and the combined description
+  `"<instructions>\n\n<template description>"`. **`certificateUrls` is
+  deliberately omitted** (see correction 6).
 
 Documented corrections (no stored data is mutated):
 
@@ -485,14 +496,32 @@ Documented corrections (no stored data is mutated):
    query by `createdAt`, which silently omitted documents missing that field
    (and required a composite index). The web panel reads the collection,
    sorts newest-first client-side, and places missing timestamps last.
+6. **New assignments keep the Flutter certificate upload visible.** The
+   Flutter upload path (`TrainingDTO.updateCertificateToFirestore` via
+   `submitCertificate`) is a partial update that writes only the legacy
+   `certificateUrl` field. Both readers give a stored `certificateUrls` array
+   precedence, so writing `certificateUrls: []` at assignment time made every
+   later upload invisible. The web action now leaves the array **absent**, so
+   the established legacy fallback resolves the upload. This is payload-only:
+   existing documents are never migrated, and an explicitly stored array
+   (including an intentionally empty one) remains authoritative.
+7. **Overdue statistics advance with the clock.** Statistics previously
+   recomputed only on a template/assignment snapshot, so a deadline passing
+   while the page was open left the overdue counter stale. The managed clock
+   refreshes the derivation every minute and on tab visibility. It performs
+   no Firestore writes and keeps the existing `< now` comparison.
 
 Tests: `src/lib/admin/__tests__/training-streams.test.ts` (mapping,
 ordering, verified counting, stats/overdue/rounding),
 `training-actions.test.ts` (payload parity, non-destructive assignment,
-inactive/ownership/role checks, retry revalidation, recipient limits) and
+inactive/ownership/role checks, retry revalidation, recipient limits),
 `src/app/dashboard/training/__tests__/training-view.test.tsx`
 (connecting/ready/empty/error+retry states, create validation, all-staff vs
-individual assignment, compliance-report pending/stale behavior).
+individual assignment, compliance-report pending/stale behavior, fake-clock
+overdue and visibility refresh), `compliance-report-dialog.test.tsx` (failed
+vs ready-empty vs retained/stale read states and Retry recovery), and
+`assignment-certificate-compat.test.tsx` (real assignment → Flutter partial
+upload → mapper/compliance → review panel).
 
 **Live-data limits:** assignment and template writes are browser writes.
 Firestore rules must authorize admin-only template creation and

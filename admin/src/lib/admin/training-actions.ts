@@ -28,7 +28,8 @@ import {
  *   - a template is `{title, description, durationText, requirementType,
  *     isActive: true, createdAt, updatedAt}`;
  *   - an assignment is written to `users/{uid}/trainings/{templateId}` with
- *     the FULL TrainingDTO map (nulls included) plus `adminId` for the
+ *     the initial TrainingDTO map (nulls included, `certificateUrls`
+ *     deliberately absent — see below) plus `adminId` for the
  *     collection-group query. The description is
  *     `"<instructions>\n\n<template description>"` when instructions exist,
  *     otherwise just the template description.
@@ -38,6 +39,11 @@ import {
  *     `batch.set` replaced the employee's whole document, so re-assigning a
  *     template reset real progress (uploads, status, completion dates).
  *     Existing documents are reported as `skippedExisting` and left intact.
+ *   - `certificateUrls` is not written for new assignments. The Flutter
+ *     upload DTO updates only the legacy `certificateUrl`; a stored empty
+ *     array would take precedence over it and hide the upload forever.
+ *     Omitting the array preserves the established legacy fallback without
+ *     changing either reader's rule that an explicitly stored array wins.
  *   - Inactive employees are never assigned new work (`skippedInactive`),
  *     and ownership/role are re-verified inside the transaction.
  *   - A single transaction reads the template, every employee profile and
@@ -193,15 +199,25 @@ function assignmentPayload(
       ? `${trimmedInstructions}\n\n${template.description}`
       : template.description
 
-  // Field-for-field TrainingDTO.toFirestore output plus adminId. `updatedAt`
-  // is the only server timestamp the Dart payload writes.
+  // Field-for-field initial TrainingDTO.toFirestore output (minus
+  // `certificateUrls`, explained below) plus adminId. `updatedAt` is the only
+  // server timestamp the Dart payload writes.
+  //
+  // `certificateUrls` is deliberately OMITTED. The Flutter upload path
+  // (`TrainingDTO.updateCertificateToFirestore` via `submitCertificate`)
+  // writes only the legacy `certificateUrl` field on an existing document.
+  // Both readers give a present `certificateUrls` array precedence, so an
+  // empty array written here would permanently hide every future upload.
+  // With no array stored, `resolveCertificateUrls` falls back to
+  // `certificateUrl` exactly like the Dart DTO. Existing documents are never
+  // migrated; an explicitly stored array (including an intentionally empty
+  // one) remains authoritative.
   return {
     title: template.title,
     description,
     durationText: template.durationText,
     status: "notStarted",
     certificateUrl: null,
-    certificateUrls: [],
     dueDate: deadline === null ? null : Timestamp.fromDate(deadline),
     completedAt: null,
     updatedAt: serverTimestamp(),

@@ -60,6 +60,16 @@ export function ComplianceReportDialog({
   const showRetainedValues =
     assignments.status === "error" && progressEverLoaded
 
+  /**
+   * A failed read is NOT an empty read. `ready` records whether this listener
+   * ever delivered a snapshot, so:
+   *   - error + never loaded → only the error banner (no empty claim);
+   *   - error + previously loaded empty → retained-empty, explicitly stale;
+   *   - ready + empty → a genuine empty result.
+   */
+  const templatesEverLoaded = templates.ready.has("templates")
+  const showStaleTemplates = templates.status === "error" && templatesEverLoaded
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
@@ -75,7 +85,11 @@ export function ComplianceReportDialog({
 
         {templates.status === "error" ? (
           <ErrorNote
-            message="Training modules could not be streamed."
+            message={
+              showStaleTemplates
+                ? "Training modules could not be updated — the list below is stale."
+                : "Training modules could not be streamed."
+            }
             error={templates.error}
             retry={templates.retry}
             testId="compliance-templates-error"
@@ -100,65 +114,91 @@ export function ComplianceReportDialog({
             Loading training modules…
           </p>
         ) : templates.data.length === 0 ? (
-          <p className="text-muted-foreground py-8 text-center text-sm">
-            No training modules found.
-          </p>
+          templates.status === "error" && !templatesEverLoaded ? null : (
+            <EmptyModules stale={showStaleTemplates} />
+          )
         ) : (
-          <ul className="divide-y" data-testid="compliance-rows">
-            {templates.data.map((template) => {
-              const entry = trainingComplianceFor(compliance, template.id)
-              const showPercent = progressReady || showRetainedValues
+          <>
+            {showStaleTemplates ? (
+              <p
+                data-testid="compliance-templates-stale"
+                className="rounded-md border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs text-amber-800"
+              >
+                Stale — showing the last successfully loaded modules.
+              </p>
+            ) : null}
+            <ul className="divide-y" data-testid="compliance-rows">
+              {templates.data.map((template) => {
+                const entry = trainingComplianceFor(compliance, template.id)
+                const showPercent = progressReady || showRetainedValues
 
-              return (
-                <li
-                  key={template.id}
-                  data-testid="compliance-row"
-                  className="space-y-3 py-4 first:pt-0 last:pb-0"
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-semibold">{template.title}</p>
-                      <p className="text-muted-foreground text-xs uppercase">
-                        {template.requirementType}
-                      </p>
+                return (
+                  <li
+                    key={template.id}
+                    data-testid="compliance-row"
+                    className="space-y-3 py-4 first:pt-0 last:pb-0"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-semibold">{template.title}</p>
+                        <p className="text-muted-foreground text-xs uppercase">
+                          {template.requirementType}
+                        </p>
+                      </div>
+                      {showPercent ? (
+                        <p
+                          data-testid={`compliance-percent-${template.id}`}
+                          className={`shrink-0 text-sm font-bold tabular-nums ${toneClass(entry.rate)}`}
+                        >
+                          {entry.rate.toFixed(1)}%
+                        </p>
+                      ) : (
+                        <p className="text-muted-foreground shrink-0 text-sm font-medium">
+                          {assignments.status === "connecting" ? "Loading…" : "—"}
+                        </p>
+                      )}
                     </div>
+
                     {showPercent ? (
-                      <p
-                        data-testid={`compliance-percent-${template.id}`}
-                        className={`shrink-0 text-sm font-bold tabular-nums ${toneClass(entry.rate)}`}
-                      >
-                        {entry.rate.toFixed(1)}%
-                      </p>
+                      <Progress value={Math.min(100, Math.max(0, entry.rate))} />
                     ) : (
-                      <p className="text-muted-foreground shrink-0 text-sm font-medium">
-                        {assignments.status === "connecting" ? "Loading…" : "—"}
-                      </p>
+                      <Progress value={0} className="opacity-40" />
                     )}
-                  </div>
 
-                  {showPercent ? (
-                    <Progress value={Math.min(100, Math.max(0, entry.rate))} />
-                  ) : (
-                    <Progress value={0} className="opacity-40" />
-                  )}
-
-                  <div className="text-muted-foreground flex items-center justify-between text-xs">
-                    <span>
-                      {showPercent
-                        ? `${entry.completed} of ${entry.total} staff members completed.`
-                        : assignments.status === "connecting"
-                          ? "Waiting for assignment data…"
-                          : "Progress unavailable."}
-                    </span>
-                    {template.isActive ? null : <span>Inactive template</span>}
-                  </div>
-                </li>
-              )
-            })}
-          </ul>
+                    <div className="text-muted-foreground flex items-center justify-between text-xs">
+                      <span>
+                        {showPercent
+                          ? `${entry.completed} of ${entry.total} staff members completed.`
+                          : assignments.status === "connecting"
+                            ? "Waiting for assignment data…"
+                            : "Progress unavailable."}
+                      </span>
+                      {template.isActive ? null : <span>Inactive template</span>}
+                    </div>
+                  </li>
+                )
+              })}
+            </ul>
+          </>
         )}
       </DialogContent>
     </Dialog>
+  )
+}
+
+function EmptyModules({ stale = false }: { stale?: boolean }) {
+  return (
+    <div data-testid="compliance-empty" className="py-8 text-center">
+      <p className="text-muted-foreground text-sm">No training modules found.</p>
+      {stale ? (
+        <p
+          data-testid="compliance-empty-stale"
+          className="mt-1 text-xs text-amber-700"
+        >
+          Stale — retained from the last successful read.
+        </p>
+      ) : null}
+    </div>
   )
 }
 

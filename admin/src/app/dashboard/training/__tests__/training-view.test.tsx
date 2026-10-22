@@ -112,6 +112,9 @@ function emitReady({
 
 afterEach(() => {
   cleanup()
+  vi.useRealTimers()
+  vi.restoreAllMocks()
+  Reflect.deleteProperty(document, "visibilityState")
 })
 
 beforeEach(() => {
@@ -489,5 +492,103 @@ describe("TrainingView — compliance report", () => {
       "stale",
     )
     expect(within(dialog).getByTestId("compliance-percent-cpr").textContent).toBe("100.0%")
+  })
+})
+
+describe("TrainingView — managed clock", () => {
+  it("marks an unfinished assignment overdue after its deadline without a new snapshot", () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date("2026-10-23T12:00:00.000Z"))
+
+    renderTraining()
+    emitReady({
+      assignments: [
+        assignment({
+          status: "notStarted",
+          dueDate: new Date("2026-10-23T12:00:30.000Z"),
+        }),
+      ],
+    })
+
+    expect(screen.getByTestId("training-stat-overdue-value").textContent).toBe("0")
+
+    act(() => {
+      vi.advanceTimersByTime(60_000)
+    })
+
+    // No stream callback was fired — only the wall clock advanced.
+    expect(screen.getByTestId("training-stat-overdue-value").textContent).toBe("1")
+  })
+
+  it("keeps completed and verified assignments out of the overdue count", () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date("2026-10-23T12:00:00.000Z"))
+
+    renderTraining()
+    emitReady({
+      assignments: [
+        assignment({
+          id: "cpr",
+          status: "completed",
+          dueDate: new Date("2026-10-23T12:00:30.000Z"),
+        }),
+        assignment({
+          id: "hipaa",
+          status: "verified",
+          dueDate: new Date("2026-10-23T12:00:30.000Z"),
+        }),
+      ],
+    })
+
+    act(() => {
+      vi.advanceTimersByTime(60_000)
+    })
+
+    expect(screen.getByTestId("training-stat-overdue-value").textContent).toBe("0")
+  })
+
+  it("refreshes the deadline comparison when the page becomes visible again", () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date("2026-10-23T12:00:00.000Z"))
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: "visible",
+    })
+
+    renderTraining()
+    emitReady({
+      assignments: [
+        assignment({
+          status: "notStarted",
+          dueDate: new Date("2026-10-23T12:01:00.000Z"),
+        }),
+      ],
+    })
+
+    expect(screen.getByTestId("training-stat-overdue-value").textContent).toBe("0")
+
+    // Simulate a throttled/backgrounded tab: time advances but no interval
+    // fires; returning to the page must refresh immediately.
+    vi.setSystemTime(new Date("2026-10-23T12:02:00.000Z"))
+    act(() => {
+      document.dispatchEvent(new Event("visibilitychange"))
+    })
+
+    expect(screen.getByTestId("training-stat-overdue-value").textContent).toBe("1")
+  })
+
+  it("removes the interval and visibility listener on unmount", () => {
+    vi.useFakeTimers()
+    const clearIntervalSpy = vi.spyOn(window, "clearInterval")
+    const removeListenerSpy = vi.spyOn(document, "removeEventListener")
+
+    const view = renderTraining()
+    view.unmount()
+
+    expect(clearIntervalSpy).toHaveBeenCalled()
+    expect(removeListenerSpy).toHaveBeenCalledWith(
+      "visibilitychange",
+      expect.any(Function),
+    )
   })
 })

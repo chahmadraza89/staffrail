@@ -1,0 +1,734 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>StaffRail — Open-Source Staff Onboarding &amp; Compliance Platform</title>
+  <meta
+    name="description"
+    content="StaffRail is a database-free, open-source employee onboarding, clearance verification, training management, and compliance auditing platform built with Next.js and Flutter."
+  />
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --surface: #ffffff;
+      --surface-muted: #f1f5f9;
+      --text: #0f172a;
+      --muted: #475569;
+      --border: #e2e8f0;
+      --primary: #109b85;
+      --primary-dark: #0d7d6b;
+      --primary-soft: #e6f6f3;
+      --accent: #0f766e;
+      --radius: 14px;
+      --shadow: 0 8px 28px rgba(15, 23, 42, 0.06);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    a {
+      color: var(--primary-dark);
+      text-decoration: none;
+    }
+
+    a:hover {
+      text-decoration: underline;
+    }
+
+    code, pre {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
+
+    .container {
+      width: min(1140px, 100% - 2rem);
+      margin-inline: auto;
+    }
+
+    /* Header */
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 40;
+      background: rgba(248, 250, 252, 0.9);
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .nav {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: 0.9rem 0;
+      flex-wrap: wrap;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 0.65rem;
+      font-weight: 800;
+      font-size: 1.125rem;
+      color: var(--text);
+      letter-spacing: -0.02em;
+    }
+
+    .brand-mark {
+      width: 34px;
+      height: 34px;
+      border-radius: 10px;
+      background: var(--primary);
+      color: #fff;
+      display: grid;
+      place-items: center;
+      font-weight: 800;
+      font-size: 0.95rem;
+      box-shadow: 0 4px 12px rgba(16, 155, 133, 0.28);
+    }
+
+    .nav-links {
+      display: flex;
+      gap: 1.25rem;
+      font-size: 0.9rem;
+      font-weight: 600;
+      flex-wrap: wrap;
+    }
+
+    .nav-links a {
+      color: var(--muted);
+    }
+
+    .nav-links a:hover {
+      color: var(--primary-dark);
+      text-decoration: none;
+    }
+
+    /* Hero */
+    .hero {
+      padding: 4rem 0 3rem;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+      padding: 0.32rem 0.78rem;
+      border-radius: 999px;
+      background: var(--primary-soft);
+      color: var(--primary-dark);
+      font-size: 0.78rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: 1.25fr 1fr;
+      gap: 2.25rem;
+      align-items: center;
+      margin-top: 1.25rem;
+    }
+
+    @media (max-width: 880px) {
+      .hero-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    h1 {
+      font-size: clamp(2rem, 4vw, 3rem);
+      line-height: 1.12;
+      letter-spacing: -0.03em;
+      margin-bottom: 1rem;
+    }
+
+    .hero-sub {
+      font-size: 1.08rem;
+      color: var(--muted);
+      max-width: 58ch;
+      margin-bottom: 1.65rem;
+    }
+
+    .cta-row {
+      display: flex;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0.72rem 1.2rem;
+      border-radius: 10px;
+      font-weight: 600;
+      font-size: 0.92rem;
+      border: 1px solid transparent;
+      cursor: pointer;
+      transition: transform 0.12s ease, background 0.15s ease;
+    }
+
+    .btn-primary {
+      background: var(--primary);
+      color: #fff;
+    }
+
+    .btn-primary:hover {
+      background: var(--primary-dark);
+      text-decoration: none;
+    }
+
+    .btn-secondary {
+      background: var(--surface);
+      color: var(--text);
+      border-color: var(--border);
+    }
+
+    .btn-secondary:hover {
+      background: var(--surface-muted);
+      text-decoration: none;
+    }
+
+    /* Quick metrics card */
+    .hero-panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.4rem;
+      box-shadow: var(--shadow);
+    }
+
+    .hero-panel h2 {
+      font-size: 0.9rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+      margin-bottom: 0.9rem;
+    }
+
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0.75rem;
+    }
+
+    .stat {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 0.85rem;
+    }
+
+    .stat-value {
+      font-size: 1.35rem;
+      font-weight: 800;
+      color: var(--primary-dark);
+      line-height: 1.2;
+    }
+
+    .stat-label {
+      font-size: 0.78rem;
+      color: var(--muted);
+      margin-top: 0.2rem;
+    }
+
+    /* Sections */
+    section {
+      padding: 3rem 0;
+      border-top: 1px solid var(--border);
+    }
+
+    .section-head {
+      margin-bottom: 1.75rem;
+    }
+
+    .section-head h2 {
+      font-size: clamp(1.45rem, 2.5vw, 1.95rem);
+      letter-spacing: -0.02em;
+      margin-bottom: 0.4rem;
+    }
+
+    .section-head p {
+      color: var(--muted);
+      max-width: 64ch;
+    }
+
+    /* Tabs */
+    .tab-bar {
+      display: inline-flex;
+      background: var(--surface-muted);
+      padding: 0.3rem;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      gap: 0.25rem;
+      margin-bottom: 1.4rem;
+      flex-wrap: wrap;
+    }
+
+    .tab-btn {
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      font-weight: 600;
+      font-size: 0.88rem;
+      padding: 0.55rem 0.95rem;
+      border-radius: 9px;
+      cursor: pointer;
+    }
+
+    .tab-btn[aria-selected="true"] {
+      background: var(--surface);
+      color: var(--primary-dark);
+      box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
+    }
+
+    .tab-panel[hidden] {
+      display: none;
+    }
+
+    /* Cards & grids */
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 1rem;
+    }
+
+    .cards-2 {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 1rem;
+    }
+
+    @media (max-width: 900px) {
+      .cards {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 640px) {
+      .cards, .cards-2 {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.2rem;
+    }
+
+    .card h3 {
+      font-size: 1.02rem;
+      margin-bottom: 0.4rem;
+    }
+
+    .card p {
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .route-badge {
+      display: inline-block;
+      margin-top: 0.65rem;
+      padding: 0.18rem 0.5rem;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      background: var(--surface-muted);
+      color: var(--accent);
+      font-weight: 600;
+    }
+
+    /* Code blocks & tables */
+    pre {
+      background: #0f172a;
+      color: #e2e8f0;
+      padding: 1rem 1.15rem;
+      border-radius: 12px;
+      overflow-x: auto;
+      font-size: 0.86rem;
+      line-height: 1.55;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      font-size: 0.9rem;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 0.78rem 1rem;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    th {
+      background: var(--surface-muted);
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      color: var(--muted);
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 2rem 0 2.5rem;
+      color: var(--muted);
+      font-size: 0.86rem;
+      display: flex;
+      justify-content: space-between;
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="container nav">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">SR</span>
+        <span>StaffRail</span>
+      </div>
+      <nav class="nav-links" aria-label="Primary navigation">
+        <a href="#features">What's Inside</a>
+        <a href="#architecture">Bring Your Own DB</a>
+        <a href="#quickstart">Quickstart</a>
+        <a href="#verification">Verification</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <!-- Hero -->
+    <div class="container hero">
+      <span class="pill">Open Source · MIT License · Zero-Database Ready</span>
+      <div class="hero-grid">
+        <div>
+          <h1>Employee onboarding, compliance &amp; verification — ready out of the box.</h1>
+          <p class="hero-sub">
+            <strong>StaffRail</strong> provides a complete Next.js web workspace for both
+            <strong>Admins</strong> (<code>/dashboard/*</code>) and <strong>Employees</strong>
+            (<code>/employee/*</code>), plus a matching Flutter mobile &amp; desktop client — with zero external
+            database or cloud lock-in required to run.
+          </p>
+          <div class="cta-row">
+            <a class="btn btn-primary" href="#quickstart">Run Locally in 30 Seconds</a>
+            <a class="btn btn-secondary" href="#architecture">Plug In Your Database</a>
+          </div>
+        </div>
+
+        <aside class="hero-panel" aria-label="Project overview metrics">
+          <h2>Platform Snapshot</h2>
+          <div class="stat-grid">
+            <div class="stat">
+              <div class="stat-value">40</div>
+              <div class="stat-label">Next.js 16 routes (Admin, Employee &amp; APIs)</div>
+            </div>
+            <div class="stat">
+              <div class="stat-value">69</div>
+              <div class="stat-label">Onboarding &amp; compliance requirements tracked across 8 sections</div>
+            </div>
+            <div class="stat">
+              <div class="stat-value">0</div>
+              <div class="stat-label">Required external DBs or cloud accounts to boot</div>
+            </div>
+            <div class="stat">
+              <div class="stat-value">792</div>
+              <div class="stat-label">Automated tests passing (611 Vitest + 181 Flutter)</div>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </div>
+
+    <!-- Role Explorer -->
+    <section id="features">
+      <div class="container">
+        <div class="section-head">
+          <h2>What Is Inside StaffRail</h2>
+          <p>Switch between portals and backend capabilities to explore every workflow shipped in the codebase.</p>
+        </div>
+
+        <div class="tab-bar" role="tablist" aria-label="Portal modules">
+          <button class="tab-btn" role="tab" aria-selected="true" aria-controls="panel-admin" id="tab-admin">
+            Admin Web Portal
+          </button>
+          <button class="tab-btn" role="tab" aria-selected="false" aria-controls="panel-employee" id="tab-employee">
+            Employee Web Portal
+          </button>
+          <button class="tab-btn" role="tab" aria-selected="false" aria-controls="panel-flutter" id="tab-flutter">
+            Flutter App &amp; Node APIs
+          </button>
+        </div>
+
+        <!-- Admin panel -->
+        <div id="panel-admin" class="tab-panel" role="tabpanel" aria-labelledby="tab-admin">
+          <div class="cards">
+            <article class="card">
+              <h3>Operations Dashboard</h3>
+              <p>Live staff compliance counts, review queue, broadcast &amp; direct messaging, and workspace notifications.</p>
+              <code class="route-badge">/dashboard</code>
+            </article>
+            <article class="card">
+              <h3>Staff Directory &amp; 69 Requirements</h3>
+              <p>Register staff, edit profiles, track onboarding progress across 8 sections, inspect uploads, accept/reject/skip tasks, and counter-sign <code>splitField</code> forms.</p>
+              <code class="route-badge">/dashboard/directory/[employeeId]</code>
+            </article>
+            <article class="card">
+              <h3>Training Management</h3>
+              <p>Create training templates, assign modules to active staff or individuals, monitor overdue deadlines, and generate compliance reports.</p>
+              <code class="route-badge">/dashboard/training</code>
+            </article>
+            <article class="card">
+              <h3>Clearance Verification</h3>
+              <p>Review background checks and credential uploads, collect digital review signatures, and approve or request replacements.</p>
+              <code class="route-badge">/dashboard/verify</code>
+            </article>
+            <article class="card">
+              <h3>Compliance Audit Logs &amp; PDFs</h3>
+              <p>Review review-event trails and export standalone PDF audit reports generated natively in Node.js without cloud functions.</p>
+              <code class="route-badge">/dashboard/audit · /api/audit-pdf</code>
+            </article>
+            <article class="card">
+              <h3>Admin Account &amp; Workspace Controls</h3>
+              <p>Edit profile, update password, review privacy policy copy, or cleanly dissolve a workspace.</p>
+              <code class="route-badge">/dashboard/profile/*</code>
+            </article>
+          </div>
+        </div>
+
+        <!-- Employee panel -->
+        <div id="panel-employee" class="tab-panel" role="tabpanel" aria-labelledby="tab-employee" hidden>
+          <div class="cards">
+            <article class="card">
+              <h3>Employee Home Dashboard</h3>
+              <p>Mobile-responsive employee shell tracking overall onboarding progress, pending action items, quick actions, and announcements.</p>
+              <code class="route-badge">/employee</code>
+            </article>
+            <article class="card">
+              <h3>Interactive Onboarding Guide</h3>
+              <p>Complete acknowledge-and-sign policies, dynamic fill-and-sign forms, dual-signature workflows, and document uploads with draft &amp; lock states.</p>
+              <code class="route-badge">/employee/guide/[taskId]</code>
+            </article>
+            <article class="card">
+              <h3>Trainings &amp; Certificates</h3>
+              <p>View assigned training details, track completion &amp; expiration timelines, and upload certificate evidence.</p>
+              <code class="route-badge">/employee/training/[trainingId]</code>
+            </article>
+            <article class="card">
+              <h3>Clearance Submissions</h3>
+              <p>Submit clearance documents and follow reviewer verification status or rejection feedback.</p>
+              <code class="route-badge">/employee/clearance/[clearanceId]</code>
+            </article>
+            <article class="card">
+              <h3>Messages &amp; Notifications</h3>
+              <p>Read direct admin notices and team broadcasts alongside real-time notification alerts.</p>
+              <code class="route-badge">/employee/messages · /notifications</code>
+            </article>
+            <article class="card">
+              <h3>Document Center &amp; Support</h3>
+              <p>Central library of uploaded documents, profile &amp; password settings, privacy notice, and support contact page.</p>
+              <code class="route-badge">/employee/profile/documents</code>
+            </article>
+          </div>
+        </div>
+
+        <!-- Flutter & APIs panel -->
+        <div id="panel-flutter" class="tab-panel" role="tabpanel" aria-labelledby="tab-flutter" hidden>
+          <div class="cards-2">
+            <article class="card">
+              <h3>Next.js Backend Route Handlers (Node.js)</h3>
+              <p>
+                Signed <code>HttpOnly</code> HMAC-SHA256 session cookies (<code>/api/auth/session</code>),
+                double-submit CSRF tokens (<code>/api/auth/csrf</code>), path-scoped RBAC &amp; multipart uploads
+                (<code>/api/data</code>), sandboxed file downloads (<code>/api/files/[...path]</code>), and
+                pure TypeScript PDF generation (<code>/api/audit-pdf</code>).
+              </p>
+              <code class="route-badge">admin/src/app/api/*</code>
+            </article>
+            <article class="card">
+              <h3>Flutter Multi-Platform Client</h3>
+              <p>
+                Includes responsive Admin and Employee views under <code>lib/</code> backed by pure-Dart local
+                abstractions (<code>LocalDataStore</code>, <code>LocalAuth</code>, <code>LocalStorage</code>,
+                <code>LocalFunctions</code>) and builds cleanly to Flutter Web with zero Firebase packages.
+              </p>
+              <code class="route-badge">lib/ · test/</code>
+            </article>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Architecture / BYO DB -->
+    <section id="architecture">
+      <div class="container">
+        <div class="section-head">
+          <h2>Database-Free Core · Plug In Your Own Database</h2>
+          <p>
+            Every external database and cloud vendor package was decoupled behind clean TypeScript and Dart
+            interfaces so you can run immediately in memory or swap in PostgreSQL, MySQL, SQLite, Supabase, or MongoDB.
+          </p>
+        </div>
+
+        <div class="cards-2">
+          <div class="card">
+            <h3>Next.js Adapter Boundary</h3>
+            <p>
+              Implement the <code>DataStore</code> interface in <code>admin/src/lib/data/types.ts</code>
+              (<code>getDoc</code>, <code>getCollection</code>, <code>getCollectionGroup</code>,
+              <code>runTransaction</code>, <code>subscribeDoc</code>, <code>uploadFile</code>) and wire it
+              into <code>admin/src/lib/data/server-store.ts</code> in place of the default
+              <code>MemoryDataStore</code>.
+            </p>
+          </div>
+          <div class="card">
+            <h3>Organization Branding via Env Vars</h3>
+            <p>
+              Customize clinic/company name, address, support contact, director signatory, and cookie/CSRF
+              secrets without modifying UI components via <code>admin/.env.example</code>
+              (<code>NEXT_PUBLIC_ORG_*</code>) and <code>lib/core/config/organization_config.dart</code>.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Quickstart & Demo Accounts -->
+    <section id="quickstart">
+      <div class="container">
+        <div class="section-head">
+          <h2>Zero-Config Quickstart</h2>
+          <p>Start the seeded Next.js web portals immediately without creating a database or <code>.env</code> file.</p>
+        </div>
+
+        <div class="cards-2">
+          <div>
+            <pre><code>cd admin
+npm install
+npm run dev
+# Open http://localhost:3000</code></pre>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>Role</th>
+                <th>Demo Email</th>
+                <th>Password</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Admin (<code>/dashboard</code>)</td>
+                <td><code>admin@staffrail.local</code></td>
+                <td><code>DemoPassword123!</code></td>
+              </tr>
+              <tr>
+                <td>Employee (<code>/employee</code>)</td>
+                <td><code>employee@staffrail.local</code></td>
+                <td><code>DemoPassword123!</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Verification -->
+    <section id="verification">
+      <div class="container">
+        <div class="section-head">
+          <h2>Verified Build &amp; Test Suite</h2>
+          <p>Snapshot of automated checks across both subprojects.</p>
+        </div>
+
+        <table>
+          <thead>
+            <tr>
+              <th>Subproject</th>
+              <th>Command</th>
+              <th>Verified Result</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Next.js (<code>admin/</code>)</td>
+              <td><code>npx tsc --noEmit</code> &amp; <code>npm run lint</code></td>
+              <td>0 TypeScript errors, 0 ESLint warnings/errors</td>
+            </tr>
+            <tr>
+              <td>Next.js (<code>admin/</code>)</td>
+              <td><code>npm test</code> (Vitest)</td>
+              <td>55 test files passed · 611 tests passed</td>
+            </tr>
+            <tr>
+              <td>Next.js (<code>admin/</code>)</td>
+              <td><code>npm run build</code></td>
+              <td>40 routes built cleanly on Next.js 16.4.2 (Turbopack)</td>
+            </tr>
+            <tr>
+              <td>Flutter (repo root)</td>
+              <td><code>flutter test</code></td>
+              <td>181 / 181 tests passed</td>
+            </tr>
+            <tr>
+              <td>Flutter (repo root)</td>
+              <td><code>flutter analyze --no-fatal-infos</code> &amp; <code>flutter build web --no-pub</code></td>
+              <td>0 errors, 0 warnings · web bundle compiled cleanly</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer class="container">
+    <span><strong>StaffRail</strong> · Open-source employee onboarding &amp; compliance portal</span>
+    <span>Licensed under the MIT License</span>
+  </footer>
+
+  <script>
+    (function () {
+      const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+      const panels = Array.from(document.querySelectorAll('[role="tabpanel"]'));
+
+      function activateTab(tab) {
+        tabs.forEach((btn) => btn.setAttribute("aria-selected", String(btn === tab)));
+        panels.forEach((panel) => {
+          panel.hidden = panel.id !== tab.getAttribute("aria-controls");
+        });
+      }
+
+      tabs.forEach((tab) => {
+        tab.addEventListener("click", () => activateTab(tab));
+      });
+    })();
+  </script>
+</body>
+</html>
